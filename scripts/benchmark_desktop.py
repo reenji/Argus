@@ -183,13 +183,17 @@ def main() -> int:
         env["PYTHON_KEYRING_BACKEND"] = "keyring.backends.fail.Keyring"
         env["GEMINI_API_KEY"] = ""
 
+    args.output_dir.mkdir(parents=True, exist_ok=True)
+    log_stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    app_log_path = args.output_dir / f"desktop-{log_stamp}-app.log"
+    app_log = app_log_path.open("w", encoding="utf-8")
     process_handle = subprocess.Popen(
         command,
         cwd=ROOT,
         env=env,
         stdin=subprocess.DEVNULL,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
+        stdout=app_log,
+        stderr=subprocess.STDOUT,
         start_new_session=(os.name != "nt"),
     )
     process = psutil.Process(process_handle.pid)
@@ -206,6 +210,7 @@ def main() -> int:
             "network_calls_disabled": not args.live_api,
             "live_api_enabled_by_user": args.live_api,
             "data_directory_is_temporary": True,
+            "app_log_file": app_log_path.name,
         },
         "scenario_plan": [],
         "samples": [],
@@ -247,6 +252,7 @@ def main() -> int:
             except (subprocess.TimeoutExpired, ProcessLookupError):
                 process_handle.kill()
                 process_handle.wait(timeout=5)
+        app_log.close()
         work_dir.cleanup()
 
     json_path, csv_path = _write_outputs(args.output_dir, report, report["samples"])
