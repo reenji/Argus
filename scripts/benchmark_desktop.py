@@ -185,7 +185,7 @@ def main() -> int:
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
     log_stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    app_log_path = args.output_dir / f"desktop-{log_stamp}-app.log"
+    app_log_path = args.output_dir / f"desktop-{version}-{log_stamp}-app.log"
     app_log = app_log_path.open("w", encoding="utf-8")
     process_handle = subprocess.Popen(
         command,
