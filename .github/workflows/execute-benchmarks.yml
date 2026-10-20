@@ -85,7 +85,7 @@ jobs:
       - name: Build desktop application
         run: python -m PyInstaller --noconfirm --clean ARGUS.spec
       - name: Run desktop benchmark scenarios in a virtual display
-        run: xvfb-run -a python scripts/benchmark_desktop.py --scenario all --output-dir docs/benchmarks
+        run: xvfb-run -a env QT_QPA_PLATFORM=offscreen python scripts/benchmark_desktop.py --scenario all --output-dir docs/benchmarks
       - name: Upload desktop benchmark reports
         if: always()
         uses: actions/upload-artifact@v4
