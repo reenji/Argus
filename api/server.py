@@ -302,7 +302,7 @@ async def save_gemini_key(
         validation = await asyncio.to_thread(validate_gemini_api_key, key)
         if not validation.valid:
             raise HTTPException(status_code=422, detail=validation.message)
-    set_user_secret(db, user.id, "gemini_api_key", key)
+    await asyncio.to_thread(set_user_secret, db, user.id, "gemini_api_key", key)
     return {"configured": True}
 
 
@@ -339,13 +339,13 @@ async def chat(
     db: Session = Depends(get_db),
 ) -> ChatResponse:
     await limiter.consume(user.id, "chat", 30, 60)
-    api_key = get_user_secret(db, user.id, "gemini_api_key")
+    api_key = await asyncio.to_thread(get_user_secret, db, user.id, "gemini_api_key")
     if not api_key:
         raise HTTPException(status_code=409, detail="Add a Gemini API key before starting ARGUS")
 
     with tenant_scope(user.id):
-        history = recent_chat_messages(user.id, limit=12)
-        memory = format_memory_for_prompt(load_memory())
+        history = await asyncio.to_thread(recent_chat_messages, user.id, limit=12)
+        memory = format_memory_for_prompt(await asyncio.to_thread(load_memory))
 
         def generate() -> str:
             from google import genai
@@ -383,9 +383,13 @@ async def chat(
             raise HTTPException(status_code=502, detail="Gemini returned an empty response")
         # Store the turn only once Gemini answers, so failures leave no
         # orphaned user message in the history sent with the next request.
-        add_chat_message(user.id, "user", payload.message)
-        add_chat_message(user.id, "assistant", response_text)
+        await asyncio.to_thread(_store_chat_turn, user.id, payload.message, response_text)
     return ChatResponse(response=response_text)
+
+
+def _store_chat_turn(user_id: str, message: str, reply: str) -> None:
+    add_chat_message(user_id, "user", message)
+    add_chat_message(user_id, "assistant", reply)
 
 
 # Browser microphone chunks are ~8 KiB of 16 kHz PCM; anything far larger is abuse.
