@@ -81,7 +81,8 @@ export function useArgusSocket() {
       const token = getToken();
       if (!token || !desired.current) return;
       setState("CONNECTING");
-      const ws = new WebSocket(`${WS_URL}/ws?token=${encodeURIComponent(token)}`);
+      // The token travels as a subprotocol so it never lands in URL logs.
+      const ws = new WebSocket(`${WS_URL}/ws`, ["argus.v1", `bearer.${token}`]);
       ws.binaryType = "arraybuffer";
       socket.current = ws;
       let retryDelay = RETRY_DELAY_MS;

@@ -295,7 +295,7 @@ class HostedApiTests(unittest.TestCase):
         patcher = patch.object(main, "ArgusLive", FakeLiveEngine)
         patcher.start()
         self.addCleanup(patcher.stop)
-        socket = self.client.websocket_connect(f"/ws?token={self.access_token}").__enter__()
+        socket = self.client.websocket_connect("/ws", subprotocols=self._live_protocols()).__enter__()
         self.addCleanup(socket.__exit__, None, None, None)
         received = [socket.receive_json(), socket.receive_json()]
         self.assertEqual({event["type"] for event in received}, {"ready", "status"})
@@ -363,8 +363,10 @@ class HostedApiTests(unittest.TestCase):
         self.assertNotIn("10.0.0.9", error["message"])
         self.assertEqual(socket.receive()["type"], "websocket.close")
 
-    def _rejected_socket(self, url):
-        """Connect to a socket the server refuses; return its error event and close code."""
+    def _live_protocols(self, token=None):
+        return ["argus.v1", f"bearer.{token or self.access_token}"]
+
+    def _rejected_socket_url(self, url):
         from starlette.websockets import WebSocketDisconnect
 
         with self.client.websocket_connect(url) as socket:
@@ -373,11 +375,29 @@ class HostedApiTests(unittest.TestCase):
                 socket.receive_json()
         return event, closed.exception.code
 
+    def _rejected_socket(self, protocols):
+        """Connect to a socket the server refuses; return its error event and close code."""
+        from starlette.websockets import WebSocketDisconnect
+
+        with self.client.websocket_connect("/ws", subprotocols=protocols) as socket:
+            event = socket.receive_json()
+            with self.assertRaises(WebSocketDisconnect) as closed:
+                socket.receive_json()
+        return event, closed.exception.code
+
     def test_websocket_rejects_missing_or_bad_tokens_with_4401(self):
-        for url in ("/ws", "/ws?token=not-a-token"):
-            event, code = self._rejected_socket(url)
-            self.assertEqual((event["type"], event["code"]), ("error", "unauthorized"), url)
-            self.assertEqual(code, 4401, url)
+        for protocols in (["argus.v1"], self._live_protocols("not-a-token")):
+            event, code = self._rejected_socket(protocols)
+            self.assertEqual((event["type"], event["code"]), ("error", "unauthorized"), protocols)
+            self.assertEqual(code, 4401, protocols)
+
+    def test_websocket_ignores_tokens_in_the_query_string(self):
+        event, code = self._rejected_socket_url(f"/ws?token={self.access_token}")
+        self.assertEqual((event["code"], code), ("unauthorized", 4401))
+
+    def test_websocket_selects_the_argus_subprotocol(self):
+        socket = self._open_live_socket()
+        self.assertEqual(socket.accepted_subprotocol, "argus.v1")
 
     def test_websocket_reports_rate_limits_with_4429(self):
         from api.rate_limit import limiter
@@ -388,13 +408,13 @@ class HostedApiTests(unittest.TestCase):
             await real_consume(user_id, bucket, 0 if bucket == "websocket" else limit, window)
 
         with patch.object(limiter, "consume", consume):
-            event, code = self._rejected_socket(f"/ws?token={self.access_token}")
+            event, code = self._rejected_socket(self._live_protocols())
         self.assertEqual(event["code"], "rate_limited")
         self.assertEqual(event["retry_after"], 60)
         self.assertEqual(code, 4429)
 
     def test_websocket_requires_a_gemini_key_with_4403(self):
-        event, code = self._rejected_socket(f"/ws?token={self.access_token}")
+        event, code = self._rejected_socket(self._live_protocols())
         self.assertEqual(event["code"], "gemini_key_required")
         self.assertEqual(code, 4403)
 
@@ -410,7 +430,7 @@ class HostedApiTests(unittest.TestCase):
         import main
 
         with patch.object(main, "ArgusLive", FakeLiveEngine):
-            with self.client.websocket_connect(f"/ws?token={self.access_token}") as socket:
+            with self.client.websocket_connect("/ws", subprotocols=self._live_protocols()) as socket:
                 received = [socket.receive_json(), socket.receive_json()]
                 self.assertEqual({event["type"] for event in received}, {"ready", "status"})
                 socket.send_json({"type": "text", "content": "status report"})

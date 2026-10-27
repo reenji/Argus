@@ -21,7 +21,7 @@ from core.api_key_validator import normalize_gemini_api_key, validate_gemini_api
 from core.tenant import tenant_scope
 from memory.memory_manager import format_memory_for_prompt, load_memory
 
-from .auth import get_current_user, websocket_user
+from .auth import WEBSOCKET_PROTOCOL, get_current_user, websocket_user
 from .config import settings
 from .database import SessionLocal, get_db, init_db
 from .gemini_errors import gemini_http_error
@@ -356,7 +356,8 @@ async def live_socket(websocket: WebSocket) -> None:
 
     # Accept before refusing: a socket closed during the handshake reaches
     # the browser as HTTP 403 / close code 1006, hiding the reason.
-    await websocket.accept()
+    offered = websocket.scope.get("subprotocols", [])
+    await websocket.accept(subprotocol=WEBSOCKET_PROTOCOL if WEBSOCKET_PROTOCOL in offered else None)
     with SessionLocal() as db:
         try:
             user = websocket_user(websocket, db)

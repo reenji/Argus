@@ -34,8 +34,17 @@ def get_current_user(
     return _user_for_token(credentials.credentials, db)
 
 
+# Browsers cannot set headers on a WebSocket, so the web client offers its
+# token as a subprotocol; unlike a query string it stays out of access logs.
+WEBSOCKET_PROTOCOL = "argus.v1"
+WEBSOCKET_TOKEN_PREFIX = "bearer."
+
+
 def websocket_user(websocket: WebSocket, db: Session) -> User:
-    token = websocket.query_params.get("token", "")
+    token = ""
+    for protocol in websocket.scope.get("subprotocols", []):
+        if protocol.startswith(WEBSOCKET_TOKEN_PREFIX):
+            token = protocol.removeprefix(WEBSOCKET_TOKEN_PREFIX)
     if not token:
         authorization = websocket.headers.get("authorization", "")
         if authorization.lower().startswith("bearer "):
