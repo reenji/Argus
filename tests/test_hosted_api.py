@@ -233,6 +233,25 @@ class WebSocketAdapterTests(unittest.TestCase):
         self.assertEqual([event["type"] for event in events], ["status", "message", "audio"])
         self.assertEqual(events[-1]["data"], "AQI=")
 
+    def test_adapter_strips_speaker_prefixes_without_losing_text(self):
+        async def run():
+            socket = FakeWebSocket()
+            client = WebSocketClient(socket)
+            sender = asyncio.create_task(client.send_events())
+            client.write_log("You: Hello")
+            client.write_log("Argus: Online.")
+            client.write_log("Research finished")
+            await asyncio.sleep(0)
+            await client.close()
+            await sender
+            return socket.events
+
+        events = asyncio.run(run())
+        self.assertEqual(
+            [(event["role"], event["content"]) for event in events],
+            [("user", "Hello"), ("assistant", "Online."), ("system", "Research finished")],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
