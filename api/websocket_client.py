@@ -24,19 +24,19 @@ class WebSocketClient:
         self.state = "CONNECTING"
         self._loop = asyncio.get_running_loop()
         self._events: asyncio.Queue[dict[str, Any] | None] = asyncio.Queue(maxsize=256)
+        self._close_code: int | None = None
+
+    def _enqueue(self, event: dict[str, Any] | None) -> None:
+        if self._events.full():
+            try:
+                self._events.get_nowait()
+            except asyncio.QueueEmpty:
+                pass
+        self._events.put_nowait(event)
 
     def _emit(self, event: dict[str, Any]) -> None:
         event.setdefault("timestamp", datetime.now(timezone.utc).isoformat())
-
-        def enqueue() -> None:
-            if self._events.full():
-                try:
-                    self._events.get_nowait()
-                except asyncio.QueueEmpty:
-                    pass
-            self._events.put_nowait(event)
-
-        self._loop.call_soon_threadsafe(enqueue)
+        self._loop.call_soon_threadsafe(self._enqueue, event)
 
     def write_log(self, text: str) -> None:
         role = "system"
@@ -107,9 +107,18 @@ class WebSocketClient:
     async def send_events(self) -> None:
         while True:
             event = await self._events.get()
-            if event is None:
+            try:
+                if event is None:
+                    if self._close_code is not None:
+                        await self.websocket.close(code=self._close_code)
+                    return
+                await self.websocket.send_json(event)
+            except Exception:
+                # The browser already went away; nothing left to deliver.
                 return
-            await self.websocket.send_json(event)
 
-    async def close(self) -> None:
-        await self._events.put(None)
+    async def close(self, code: int | None = None) -> None:
+        """Stop sending after the queued events; with a code, also close the socket."""
+        self._close_code = code
+        # Scheduled like _emit so events emitted just before still go out first.
+        self._loop.call_soon_threadsafe(self._enqueue, None)

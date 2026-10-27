@@ -50,6 +50,12 @@ from .websocket_client import WebSocketClient
 
 logger = logging.getLogger(__name__)
 
+WS_CLOSE_SERVICE_RESTART = 1012
+WS_CLOSE_UNAUTHORIZED = 4401
+WS_CLOSE_GEMINI_KEY_REQUIRED = 4403
+WS_CLOSE_SESSION_REPLACED = 4409
+WS_CLOSE_RATE_LIMITED = 4429
+
 
 class LiveSessionRegistry:
     def __init__(self):
@@ -61,8 +67,15 @@ class LiveSessionRegistry:
             previous = self._sessions.pop(user_id, None)
             self._sessions[user_id] = (engine, client, task)
         if previous:
-            previous[0].request_shutdown()
-            previous[2].cancel()
+            engine, client, task = previous
+            client._emit({
+                "type": "error",
+                "code": "session_replaced",
+                "message": "ARGUS was opened in another window.",
+            })
+            await client.close(code=WS_CLOSE_SESSION_REPLACED)
+            engine.request_shutdown()
+            task.cancel()
 
     async def remove(self, user_id: str, task: asyncio.Task) -> None:
         async with self._lock:
@@ -89,7 +102,7 @@ class LiveSessionRegistry:
         for engine, client, task in sessions:
             engine.request_shutdown()
             task.cancel()
-            await client.close()
+            await client.close(code=WS_CLOSE_SERVICE_RESTART)
 
 
 live_sessions = LiveSessionRegistry()
@@ -365,11 +378,6 @@ def _decode_live_audio(data: Any) -> bytes:
         raise LiveFrameError("invalid_audio", "Audio data must be base64 text.") from exc
     _check_audio_size(len(audio))
     return audio
-
-
-WS_CLOSE_UNAUTHORIZED = 4401
-WS_CLOSE_GEMINI_KEY_REQUIRED = 4403
-WS_CLOSE_RATE_LIMITED = 4429
 
 
 async def _refuse_live_socket(websocket: WebSocket, close_code: int, code: str, message: str, **extra) -> None:
