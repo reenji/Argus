@@ -293,6 +293,11 @@ async def chat(
     return ChatResponse(response=response_text)
 
 
+# Browser microphone chunks are ~8 KiB of 16 kHz PCM; anything far larger is abuse.
+MAX_AUDIO_CHUNK_BYTES = 64 * 1024
+MAX_LIVE_TEXT_CHARS = 12000
+
+
 class LiveFrameError(ValueError):
     """A client frame that is rejected without ending the live session."""
 
@@ -312,13 +317,27 @@ def _parse_live_event(raw: str) -> dict:
     return event
 
 
+def _check_audio_size(size: int) -> None:
+    if size > MAX_AUDIO_CHUNK_BYTES:
+        raise LiveFrameError(
+            "audio_too_large",
+            f"Audio chunks must be at most {MAX_AUDIO_CHUNK_BYTES} bytes.",
+        )
+
+
 def _decode_live_audio(data: Any) -> bytes:
     if not isinstance(data, str):
         raise LiveFrameError("invalid_audio", "Audio data must be base64 text.")
+    # Reject before decoding so oversized frames never allocate the payload;
+    # this is the base64 length of a MAX_AUDIO_CHUNK_BYTES chunk.
+    if len(data) > (MAX_AUDIO_CHUNK_BYTES + 2) // 3 * 4:
+        _check_audio_size(MAX_AUDIO_CHUNK_BYTES + 1)
     try:
-        return base64.b64decode(data, validate=True)
+        audio = base64.b64decode(data, validate=True)
     except (binascii.Error, ValueError) as exc:
         raise LiveFrameError("invalid_audio", "Audio data must be base64 text.") from exc
+    _check_audio_size(len(audio))
+    return audio
 
 
 @app.websocket("/ws")
@@ -364,6 +383,7 @@ async def live_socket(websocket: WebSocket) -> None:
     async def handle_frame(message: dict) -> bool:
         """Apply one client frame; return False when the client asked to close."""
         if message.get("bytes") is not None:
+            _check_audio_size(len(message["bytes"]))
             await engine.send_audio_chunk(message["bytes"])
             return True
         raw = message.get("text")
@@ -372,9 +392,15 @@ async def live_socket(websocket: WebSocket) -> None:
         event = _parse_live_event(raw)
         event_type = event.get("type")
         if event_type == "text":
+            content = str(event.get("content", ""))
+            if len(content) > MAX_LIVE_TEXT_CHARS:
+                raise LiveFrameError(
+                    "text_too_long",
+                    f"Messages must be at most {MAX_LIVE_TEXT_CHARS} characters.",
+                )
             await limiter.consume(user.id, "live_text", 60, 60)
             with tenant_scope(user.id):
-                await engine.send_text(str(event.get("content", "")))
+                await engine.send_text(content)
         elif event_type == "audio":
             await engine.send_audio_chunk(
                 _decode_live_audio(event.get("data", "")),

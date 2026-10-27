@@ -330,6 +330,8 @@ class HostedApiTests(unittest.TestCase):
         oversized = base64.b64encode(b"\x00" * (MAX_AUDIO_CHUNK_BYTES + 3)).decode()
         socket.send_json({"type": "audio", "data": oversized})
         self.assertEqual(socket.receive_json()["code"], "audio_too_large")
+        largest = base64.b64encode(b"\x00" * MAX_AUDIO_CHUNK_BYTES).decode()
+        socket.send_json({"type": "audio", "data": largest})
         socket.send_json({"type": "text", "content": "x" * (MAX_LIVE_TEXT_CHARS + 1)})
         self.assertEqual(socket.receive_json()["code"], "text_too_long")
         self._assert_session_alive(socket)
