@@ -403,11 +403,12 @@ class HostedApiTests(unittest.TestCase):
         with patch.object(api.repositories, "add_chat_message", add_wrapper):
             socket = self._open_live_socket()
             self._assert_session_alive(socket)
+            # The typed turn and the echoed reply are both stored.
             for _ in range(200):
-                if adds:
+                if len(adds) >= 2:
                     break
                 threading.Event().wait(0.01)
-        self.assertEqual(adds, ["worker"])
+        self.assertEqual(adds, ["worker", "worker"])
 
     def test_signups_are_limited_per_address(self):
         address = _random_address()
