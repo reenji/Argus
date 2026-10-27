@@ -914,5 +914,40 @@ class WebSocketAdapterTests(unittest.TestCase):
         )
 
 
+class WebSocketQueueTests(unittest.TestCase):
+    def _collect(self, fill):
+        async def run():
+            socket = FakeWebSocket()
+            client = WebSocketClient(socket)
+            fill(client)
+            await asyncio.sleep(0)
+            await client.close()
+            await client.send_events()
+            return socket.events
+
+        return asyncio.run(run())
+
+    def test_a_full_queue_drops_audio_before_control_events(self):
+        def fill(client):
+            client.set_state("SPEAKING")
+            for _ in range(300):
+                client.send_audio(b"\x00\x01")
+            client.set_state("LISTENING")
+
+        events = self._collect(fill)
+        states = [event["state"] for event in events if event["type"] == "status"]
+        self.assertEqual(states, ["SPEAKING", "LISTENING"])
+        self.assertLessEqual(len(events), 256)
+
+    def test_an_interruption_clears_queued_audio(self):
+        def fill(client):
+            for _ in range(5):
+                client.send_audio(b"\x00\x01")
+            client.interrupt_audio()
+
+        events = self._collect(fill)
+        self.assertEqual([event["type"] for event in events], ["audio_clear"])
+
+
 if __name__ == "__main__":
     unittest.main()

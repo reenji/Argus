@@ -15,12 +15,20 @@ class RecordingClient:
         self.on_text_command = None
         self._voice_combo = None
         self.errors = []
+        self.states = []
+        self.interruptions = 0
 
     def __getattr__(self, _name):
         return lambda *args, **kwargs: None
 
     def report_error(self, code, message):
         self.errors.append(code)
+
+    def set_state(self, state):
+        self.states.append(state)
+
+    def interrupt_audio(self):
+        self.interruptions += 1
 
 
 def _failing_connect(error):
@@ -85,6 +93,47 @@ class LiveEngineTests(unittest.TestCase):
             return first, second
 
         self.assertEqual(asyncio.run(scenario()), (True, False))
+
+
+class LiveAudioTests(unittest.TestCase):
+    def _engine(self):
+        return main.ArgusLive(RecordingClient(), cloud_safe=True, api_key="test-key", external_audio=True)
+
+    def test_speaking_state_is_sent_once_per_change(self):
+        engine = self._engine()
+        for value in (True, True, True, False, False):
+            engine.set_speaking(value)
+        self.assertEqual(engine.ui.states, ["SPEAKING", "LISTENING"])
+
+    def test_an_interruption_drops_queued_reply_audio(self):
+        engine = self._engine()
+
+        def response(**server_content):
+            return SimpleNamespace(
+                data=None,
+                server_content=SimpleNamespace(
+                    output_transcription=None, input_transcription=None,
+                    turn_complete=False, model_turn=None, **server_content,
+                ),
+                tool_call=None,
+            )
+
+        class Session:
+            async def receive(self):
+                yield response(interrupted=True)
+                engine.request_shutdown()
+
+        async def scenario():
+            engine.session = Session()
+            engine.audio_in_queue = asyncio.Queue()
+            for chunk in (b"a", b"b", b"c"):
+                engine.audio_in_queue.put_nowait(chunk)
+            engine._turn_done_event = asyncio.Event()
+            await asyncio.wait_for(engine._receive_audio(), timeout=5)
+
+        asyncio.run(scenario())
+        self.assertTrue(engine.audio_in_queue.empty())
+        self.assertEqual(engine.ui.interruptions, 1)
 
 
 if __name__ == "__main__":
