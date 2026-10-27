@@ -4,16 +4,10 @@ from __future__ import annotations
 
 from fastapi import HTTPException, status
 
+from .errors import api_error as _error
+
 
 _KEY_REJECTED_MARKERS = ("api key not valid", "api_key_invalid", "invalid api key")
-
-
-def _error(status_code: int, code: str, message: str, headers: dict | None = None) -> HTTPException:
-    return HTTPException(
-        status_code=status_code,
-        detail={"code": code, "message": message},
-        headers=headers,
-    )
 
 
 def gemini_http_error(exc: BaseException) -> HTTPException:

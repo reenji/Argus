@@ -8,6 +8,7 @@ import time
 from fastapi import HTTPException, status
 
 from .config import settings
+from .errors import api_error
 
 
 class RateLimiter:
@@ -69,9 +70,10 @@ class RateLimiter:
     async def consume(self, user_id: str, bucket: str, limit: int, window: int) -> None:
         count = await self._increment(self._key(user_id, bucket, window), window)
         if count > limit:
-            raise HTTPException(
-                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-                detail="Request limit reached. Please try again shortly.",
+            raise api_error(
+                status.HTTP_429_TOO_MANY_REQUESTS,
+                "rate_limited",
+                "Request limit reached. Please try again shortly.",
                 headers={"Retry-After": str(window)},
             )
 

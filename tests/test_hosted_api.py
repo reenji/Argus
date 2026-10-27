@@ -244,6 +244,67 @@ class HostedApiTests(unittest.TestCase):
         self.assertEqual(response.json()["detail"]["code"], "internal_error")
         self.assertNotIn("10.0.0.5", response.text)
 
+    def _error_code(self, response, status_code):
+        self.assertEqual(response.status_code, status_code, response.text)
+        detail = response.json()["detail"]
+        self.assertIsInstance(detail, dict, response.text)
+        self.assertTrue(detail.get("message"), response.text)
+        return detail["code"]
+
+    def test_every_api_error_has_a_code_and_message(self):
+        signup = {"email": self.email, "password": "correct-horse-battery-staple", "display_name": "Dup"}
+        self.assertEqual(self._error_code(
+            self.client.post("/auth/signup", headers=_from(_random_address()), json=signup), 409,
+        ), "account_exists")
+        self.assertEqual(self._error_code(self._login_from(_random_address()), 401), "invalid_credentials")
+        self.assertEqual(self._error_code(self.client.get("/auth/me"), 401), "unauthorized")
+        self.assertEqual(self._error_code(
+            self.client.get("/auth/me", headers={"Authorization": "Bearer nope"}), 401,
+        ), "unauthorized")
+        self.assertEqual(self._error_code(
+            self.client.post("/chat", headers=self.headers, json={"message": "hi"}), 409,
+        ), "gemini_key_required")
+
+    def test_validation_errors_name_the_offending_fields(self):
+        response = self.client.post("/auth/signup", headers=_from(_random_address()), json={
+            "email": "not-an-email", "password": "short", "display_name": "x",
+        })
+        self.assertEqual(self._error_code(response, 422), "invalid_request")
+        self.assertEqual(set(response.json()["detail"]["fields"]), {"email", "password"})
+
+    def test_rate_limits_answer_with_a_code(self):
+        attacker = _random_address()
+        for _ in range(10):
+            self._login_from(attacker)
+        self.assertEqual(self._error_code(self._login_from(attacker), 429), "rate_limited")
+
+    def test_a_key_that_normalizes_to_nothing_is_rejected_not_a_500(self):
+        response = self.client.post(
+            "/me/gemini-key", headers=self.headers, json={"api_key": " " * 25, "validate": False},
+        )
+        self.assertEqual(self._error_code(response, 422), "gemini_key_invalid")
+
+    def test_unverifiable_keys_are_reported_as_a_gemini_outage(self):
+        import api.server
+        from core.api_key_validator import ApiKeyValidationResult
+
+        outage = ApiKeyValidationResult(False, "Gemini validation timed out.", retryable=True)
+        with patch.object(api.server, "validate_gemini_api_key", return_value=outage):
+            response = self.client.post(
+                "/me/gemini-key", headers=self.headers, json={"api_key": "AIza" + "V" * 35},
+            )
+        self.assertEqual(self._error_code(response, 503), "gemini_unavailable")
+
+    def test_server_errors_keep_cors_headers(self):
+        import api.server
+
+        client = TestClient(app, raise_server_exceptions=False)
+        origin = api.server.settings.cors_origins[0]
+        with patch.object(api.server.live_sessions, "status", side_effect=RuntimeError("boom")):
+            response = client.get("/status", headers={**self.headers, "Origin": origin})
+        self.assertEqual(response.status_code, 500)
+        self.assertEqual(response.headers.get("access-control-allow-origin"), origin)
+
     def _client_ip_for(self, headers, address="10.1.2.3", **overrides):
         import dataclasses
         import api.server
