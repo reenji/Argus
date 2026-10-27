@@ -573,7 +573,8 @@ async def live_socket(websocket: WebSocket) -> None:
         """Apply one client frame; return False when the client asked to close."""
         if message.get("bytes") is not None:
             _check_audio_size(len(message["bytes"]))
-            await engine.send_audio_chunk(message["bytes"])
+            if not client.muted:
+                await engine.send_audio_chunk(message["bytes"])
             return True
         raw = message.get("text")
         if raw is None:
@@ -587,16 +588,30 @@ async def live_socket(websocket: WebSocket) -> None:
                     "text_too_long",
                     f"Messages must be at most {MAX_LIVE_TEXT_CHARS} characters.",
                 )
+            if not content.strip():
+                raise LiveFrameError("invalid_frame", "Messages cannot be empty.")
             await limiter.consume(user.id, "live_text", 60, 60)
+            if getattr(engine, "session", True) is None:
+                raise LiveFrameError("not_ready", "ARGUS is still connecting. Try again in a moment.")
+            # Spoken turns are stored from their transcript; typed ones here,
+            # before sending, so the turn precedes the reply in the history.
+            client._store_history("user", content)
             with tenant_scope(user.id):
-                await engine.send_text(content)
+                sent = await engine.send_text(content)
+            if not sent:
+                raise LiveFrameError("not_ready", "ARGUS is still connecting. Try again in a moment.")
         elif event_type == "audio":
-            await engine.send_audio_chunk(
-                _decode_live_audio(event.get("data", "")),
-                str(event.get("mime_type") or "audio/pcm;rate=16000"),
-            )
+            audio = _decode_live_audio(event.get("data", ""))
+            if not client.muted:
+                await engine.send_audio_chunk(
+                    audio,
+                    str(event.get("mime_type") or "audio/pcm;rate=16000"),
+                )
         elif event_type == "mute":
-            client.muted = bool(event.get("muted", True))
+            muted = event.get("muted", True)
+            if not isinstance(muted, bool):
+                raise LiveFrameError("invalid_frame", "muted must be true or false.")
+            client.muted = muted
             client.set_state("MUTED" if client.muted else "LISTENING")
         elif event_type == "ping":
             client._emit({
