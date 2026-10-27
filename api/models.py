@@ -89,7 +89,11 @@ class UserConfig(Base):
 
 class ChatMessage(Base):
     __tablename__ = "chat_messages"
-    __table_args__ = (Index("ix_chat_user_created", "user_id", "created_at"),)
+    __table_args__ = (
+        Index("ix_chat_user_created", "user_id", "created_at"),
+        # Retention deletes by age across all users.
+        Index("ix_chat_messages_created_at", "created_at"),
+    )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
     user_id: Mapped[str] = mapped_column(
@@ -102,7 +106,10 @@ class ChatMessage(Base):
 
 class TaskRecord(Base):
     __tablename__ = "task_records"
-    __table_args__ = (Index("ix_task_user_created", "user_id", "created_at"),)
+    __table_args__ = (
+        Index("ix_task_user_created", "user_id", "created_at"),
+        Index("ix_task_records_created_at", "created_at"),
+    )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
     user_id: Mapped[str] = mapped_column(
@@ -121,6 +128,7 @@ class AnswerCacheEntry(Base):
     __tablename__ = "answer_cache_entries"
     __table_args__ = (
         UniqueConstraint("user_id", "normalized_question", name="uq_answer_user_question"),
+        Index("ix_answer_cache_entries_updated_at", "updated_at"),
     )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
