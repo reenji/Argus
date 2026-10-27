@@ -14,11 +14,15 @@ API_CONFIG_PATH = BASE_DIR / "config" / "api_keys.json"
 
 
 def _get_api_key() -> str:
+    from core.tenant import get_current_user_id
     from memory.config_manager import get_gemini_key
 
     stored_key = get_gemini_key()
     if stored_key:
         return stored_key
+    if get_current_user_id():
+        # Hosted users pay for their own calls; never fall back to the operator key.
+        raise ValueError("Add a Gemini API key before using web search.")
     env_key = os.environ.get("GEMINI_API_KEY", "").strip()
     if env_key:
         return env_key

@@ -122,7 +122,12 @@ class ResearchResult:
 
 
 def _api_key() -> str:
-    key = str(get_gemini_key() or os.environ.get("GEMINI_API_KEY", "")).strip()
+    from core.tenant import get_current_user_id
+
+    key = str(get_gemini_key() or "").strip()
+    if not key and not get_current_user_id():
+        # Hosted users pay for their own calls; only the desktop app uses the env key.
+        key = os.environ.get("GEMINI_API_KEY", "").strip()
     if not key:
         raise RuntimeError("A valid Gemini API key is required for deep research.")
     return key

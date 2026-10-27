@@ -48,3 +48,19 @@ account has one live session at a time:
 | 4429 | `rate_limited` | Reconnect after `retry_after` seconds. |
 | 1012 | — | The server is restarting; reconnect shortly. |
 | 1000 | `internal_error` | Reconnect; the failure is in the server log. |
+
+## Tools in the hosted app
+
+The hosted engine runs with `cloud_safe=True` and offers only tools that do not
+touch the server's files, desktop or network on the user's behalf:
+
+| Tool | Hosted restrictions |
+|---|---|
+| `web_search` | Uses the user's own Gemini key. |
+| `code_generator` | Returns code as text; nothing is written to disk. |
+| `deep_research` | Runs in the background; reports can be read aloud but not saved (`output_path` is not accepted). |
+| `create_presentation` | Runs in the background; source files, source URLs, templates, `output_path` and `open_after_create` are not accepted. |
+
+Email, flights, YouTube and every computer-control tool are desktop-only. Tools
+never fall back to the operator's `GEMINI_API_KEY` for a signed-in user, and
+tool arguments are not written to the server log.
