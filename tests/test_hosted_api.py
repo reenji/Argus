@@ -495,6 +495,23 @@ class HostedApiTests(unittest.TestCase):
         self.assertEqual(event["code"], "gemini_key_required")
         self.assertEqual(code, 4403)
 
+    def test_a_new_live_session_closes_the_previous_one(self):
+        from starlette.websockets import WebSocketDisconnect
+
+        first = self._open_live_socket()
+        second = self.client.websocket_connect("/ws", subprotocols=self._live_protocols()).__enter__()
+        self.addCleanup(second.__exit__, None, None, None)
+
+        event = first.receive_json()
+        self.assertEqual((event["type"], event["code"]), ("error", "session_replaced"))
+        with self.assertRaises(WebSocketDisconnect) as closed:
+            first.receive_json()
+        self.assertEqual(closed.exception.code, 4409)
+
+        received = [second.receive_json(), second.receive_json()]
+        self.assertEqual({event["type"] for event in received}, {"ready", "status"})
+        self._assert_session_alive(second)
+
     def test_authenticated_websocket_streams_engine_events(self):
         raw_key = "AIza" + "B" * 35
         response = self.client.post(
