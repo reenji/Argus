@@ -159,7 +159,20 @@ def health() -> dict:
 
 
 def _client_ip(request: Request) -> str:
-    # uvicorn --proxy-headers already resolves X-Forwarded-For into client.host.
+    if settings.client_ip_header:
+        value = request.headers.get(settings.client_ip_header, "").strip()
+        if value:
+            return value
+    if settings.trusted_proxy_hops > 0:
+        hops = [
+            hop.strip()
+            for hop in request.headers.get("x-forwarded-for", "").split(",")
+            if hop.strip()
+        ]
+        # Only the rightmost hops were written by our proxies; the rest is
+        # whatever the client sent.
+        if len(hops) >= settings.trusted_proxy_hops:
+            return hops[-settings.trusted_proxy_hops]
     return request.client.host if request.client else "unknown"
 
 

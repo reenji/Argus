@@ -31,6 +31,10 @@ class Settings:
         "http://localhost:3000,http://127.0.0.1:3000",
     )
     chat_model: str = os.environ.get("ARGUS_CHAT_MODEL", "gemini-2.5-flash")
+    # Where the real client address comes from behind a proxy. X-Forwarded-For
+    # is client-controlled except for the hops the platform proxies append.
+    client_ip_header: str = os.environ.get("CLIENT_IP_HEADER", "").strip()
+    trusted_proxy_hops: int = int(os.environ.get("TRUSTED_PROXY_HOPS", "0"))
     chat_timeout_seconds: float = float(os.environ.get("ARGUS_CHAT_TIMEOUT_SECONDS", "60"))
     auto_create_tables: bool = os.environ.get("AUTO_CREATE_TABLES", "1").lower() in {
         "1", "true", "yes", "on",
