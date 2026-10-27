@@ -55,6 +55,7 @@ export function useArgusSocket({ onKeyRequired }: SocketCallbacks = {}) {
   const startingMic = useRef(false);
   const playback = useRef<AudioContext | null>(null);
   const nextPlaybackAt = useRef(0);
+  const scheduled = useRef(new Set<AudioBufferSourceNode>());
   const stopMicRef = useRef<(() => Promise<void>) | null>(null);
   const [state, setState] = useState<ArgusState>("CONNECTING");
   const [messages, setMessages] = useState<Message[]>([]);
@@ -69,7 +70,7 @@ export function useArgusSocket({ onKeyRequired }: SocketCallbacks = {}) {
     return playback.current;
   }, []);
 
-  const playAudio = useCallback(async (encoded: string) => {
+  const playAudio = useCallback(async (encoded: string, mimeType?: string) => {
     const context = await ensurePlayback();
     const binary = window.atob(encoded);
     const bytes = new Uint8Array(binary.length);
@@ -77,7 +78,8 @@ export function useArgusSocket({ onKeyRequired }: SocketCallbacks = {}) {
     const view = new DataView(bytes.buffer);
     const samples = new Float32Array(Math.floor(bytes.byteLength / 2));
     for (let i = 0; i < samples.length; i += 1) samples[i] = view.getInt16(i * 2, true) / 32768;
-    const buffer = context.createBuffer(1, samples.length, 24000);
+    const rate = Number(/rate=(\d+)/.exec(mimeType ?? "")?.[1]) || 24000;
+    const buffer = context.createBuffer(1, samples.length, rate);
     buffer.copyToChannel(samples, 0);
     const source = context.createBufferSource();
     source.buffer = buffer;
@@ -85,7 +87,16 @@ export function useArgusSocket({ onKeyRequired }: SocketCallbacks = {}) {
     const start = Math.max(context.currentTime + 0.02, nextPlaybackAt.current);
     source.start(start);
     nextPlaybackAt.current = start + buffer.duration;
+    scheduled.current.add(source);
+    source.onended = () => { scheduled.current.delete(source); };
   }, [ensurePlayback]);
+
+  /** Silence reply audio already scheduled, e.g. when the user talks over ARGUS. */
+  const clearPlayback = useCallback(() => {
+    scheduled.current.forEach((source) => { try { source.stop(); } catch { /* already ended */ } });
+    scheduled.current.clear();
+    nextPlaybackAt.current = 0;
+  }, []);
 
   const keyRequired = useRef(onKeyRequired);
   useEffect(() => { keyRequired.current = onKeyRequired; }, [onKeyRequired]);
@@ -137,7 +148,10 @@ export function useArgusSocket({ onKeyRequired }: SocketCallbacks = {}) {
         }
         if (event.type === "transcript" && typeof event.content === "string") setTranscript((value) => `${value} ${event.content}`.trim());
         if (event.type === "transcript_clear") setTranscript("");
-        if (event.type === "audio" && typeof event.data === "string") playAudio(event.data).catch(() => setError("Audio playback needs browser permission."));
+        if (event.type === "audio" && typeof event.data === "string") {
+          playAudio(event.data, event.mime_type).catch(() => setError("Audio playback needs browser permission."));
+        }
+        if (event.type === "audio_clear") clearPlayback();
         if (event.type === "progress" && event.visible !== false) {
           setProgress({ kind: String(event.kind), label: String(event.label), percent: Number(event.percent) || 0, phase: String(event.phase ?? "") });
         }
@@ -185,7 +199,7 @@ export function useArgusSocket({ onKeyRequired }: SocketCallbacks = {}) {
       socket.current?.close();
       socket.current = null;
     };
-  }, [playAudio]);
+  }, [playAudio, clearPlayback]);
 
   const sendText = useCallback(async (content: string) => {
     const clean = content.trim();
