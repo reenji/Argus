@@ -72,9 +72,11 @@ Para subir o conjunto local com Docker:
 docker compose up --build
 ```
 
-Depois, abra `http://localhost:3000`. Consulte o [guia de uso](docs/USAGE.md)
-para configuração da API, do cliente web e dos modelos de deploy. A presença
-dos templates de deploy não significa que exista um serviço hospedado público.
+Depois, abra `http://localhost:3000`. A [referência da API hospedada](docs/HOSTED_API.md)
+cobre autenticação, códigos de erro e de fechamento, as ferramentas disponíveis
+no app hospedado e como ele escala; o [`.env.example`](.env.example) lista a
+configuração. A presença dos templates de deploy não significa que exista um
+serviço hospedado público.
 
 ## Privacidade e segurança
 
