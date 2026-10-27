@@ -128,6 +128,19 @@ class HostedApiTests(unittest.TestCase):
         self.assertEqual(response.status_code, 401)
         check.assert_called_once_with("whatever-123")
 
+    def test_logout_revokes_issued_tokens(self):
+        self.assertEqual(self.client.get("/auth/me", headers=self.headers).status_code, 200)
+        self.assertEqual(self.client.post("/auth/logout", headers=self.headers).status_code, 204)
+        self.assertEqual(self.client.get("/auth/me", headers=self.headers).status_code, 401)
+
+        response = TestClient(app, client=(_random_address(), 50000)).post(
+            "/auth/login",
+            json={"email": self.email, "password": "correct-horse-battery-staple"},
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        fresh = {"Authorization": f"Bearer {response.json()['access_token']}"}
+        self.assertEqual(self.client.get("/auth/me", headers=fresh).status_code, 200)
+
     def test_signups_are_limited_per_address(self):
         client = TestClient(app, client=(_random_address(), 50000))
         created = []

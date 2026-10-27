@@ -183,7 +183,10 @@ async def signup(
         db.rollback()
         raise HTTPException(status_code=409, detail="An account already exists for this email") from exc
     db.refresh(user)
-    return SessionView(access_token=create_access_token(user.id), user=_user_view(user, db))
+    return SessionView(
+        access_token=create_access_token(user.id, user.session_version),
+        user=_user_view(user, db),
+    )
 
 
 @app.post("/auth/login", response_model=SessionView)
@@ -201,7 +204,10 @@ async def login(
         verify_unknown_account(payload.password)
     if not user or not verify_password(payload.password, user.password_hash):
         raise HTTPException(status_code=401, detail="Email or password is incorrect")
-    return SessionView(access_token=create_access_token(user.id), user=_user_view(user, db))
+    return SessionView(
+        access_token=create_access_token(user.id, user.session_version),
+        user=_user_view(user, db),
+    )
 
 
 @app.get("/auth/me", response_model=UserView)
@@ -210,8 +216,10 @@ def me(user: User = Depends(get_current_user), db: Session = Depends(get_db)) ->
 
 
 @app.post("/auth/logout", status_code=204)
-def logout(_: User = Depends(get_current_user)) -> None:
-    return None
+def logout(user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> None:
+    """End every session of this account by invalidating issued tokens."""
+    user.session_version += 1
+    db.commit()
 
 
 @app.post("/me/gemini-key")

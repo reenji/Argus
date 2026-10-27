@@ -56,10 +56,11 @@ def _unb64(value: str) -> bytes:
     return base64.urlsafe_b64decode(value + "=" * (-len(value) % 4))
 
 
-def create_access_token(user_id: str) -> str:
+def create_access_token(user_id: str, session_version: int = 0) -> str:
     now = datetime.now(timezone.utc)
     payload = {
         "sub": str(user_id),
+        "ver": int(session_version),
         "iat": int(now.timestamp()),
         "exp": int((now + timedelta(minutes=settings.access_token_minutes)).timestamp()),
         "jti": secrets.token_urlsafe(12),

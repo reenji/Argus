@@ -22,6 +22,8 @@ def _user_for_token(token: str, db: Session) -> User:
     user = db.get(User, str(payload["sub"]))
     if not user:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Account not found")
+    if int(payload.get("ver", 0)) != user.session_version:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or expired session")
     return user
 
 
