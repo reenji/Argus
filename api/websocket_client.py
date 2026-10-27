@@ -11,6 +11,8 @@ from typing import Any
 from fastapi import WebSocket
 
 
+_SPEAKER_PREFIXES = (("You: ", "user"), ("Argus: ", "assistant"))
+
 class WebSocketClient:
     def __init__(self, websocket: WebSocket, user_id: str | None = None):
         self.websocket = websocket
@@ -39,10 +41,10 @@ class WebSocketClient:
     def write_log(self, text: str) -> None:
         role = "system"
         content = str(text)
-        if content.startswith("You: "):
-            role, content = "user", content[5:]
-        elif content.startswith("Argus: "):
-            role, content = "assistant", content[8:]
+        for prefix, speaker in _SPEAKER_PREFIXES:
+            if content.startswith(prefix):
+                role, content = speaker, content.removeprefix(prefix)
+                break
         if self.user_id and role in {"user", "assistant"}:
             from .repositories import add_chat_message
 
