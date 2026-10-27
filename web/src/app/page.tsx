@@ -1,18 +1,19 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { AuthScreen } from "@/components/auth-screen";
 import { ArgusConsole } from "@/components/argus-console";
 import { Onboarding } from "@/components/onboarding";
-import { api, getToken, setToken, type Session, type User } from "@/lib/api";
+import { Button } from "@/components/ui/button";
+import { api, ApiError, getToken, onUnauthorized, setToken, type Session, type User } from "@/lib/api";
 
-type View = "loading" | "auth" | "onboarding" | "console";
+type View = "loading" | "unreachable" | "auth" | "onboarding" | "console";
 
 export default function Home() {
   const [view, setView] = useState<View>("loading");
   const [user, setUser] = useState<User | null>(null);
 
-  useEffect(() => {
+  const restoreSession = useCallback(() => {
     if (!getToken()) {
       queueMicrotask(() => setView("auth"));
       return;
@@ -22,11 +23,23 @@ export default function Home() {
         setUser(nextUser);
         setView(nextUser.gemini_configured ? "console" : "onboarding");
       })
-      .catch(() => {
-        setToken(null);
-        setView("auth");
+      .catch((reason) => {
+        // Only a rejected token ends the session; an outage or deploy keeps it.
+        if (reason instanceof ApiError && reason.status === 401) {
+          setToken(null);
+          setView("auth");
+        } else {
+          setView("unreachable");
+        }
       });
   }, []);
+
+  useEffect(restoreSession, [restoreSession]);
+
+  useEffect(() => onUnauthorized(() => {
+    setUser(null);
+    setView("auth");
+  }), []);
 
   function handleSession(session: Session) {
     setToken(session.access_token);
@@ -43,6 +56,14 @@ export default function Home() {
 
   if (view === "loading") {
     return <div className="boot-screen"><div className="boot-pulse" aria-label="Initializing ARGUS" /></div>;
+  }
+  if (view === "unreachable") {
+    return (
+      <div className="boot-screen" role="alert">
+        <p>ARGUS could not reach its server.</p>
+        <Button onClick={() => { setView("loading"); restoreSession(); }}>Try again</Button>
+      </div>
+    );
   }
   if (view === "auth") return <AuthScreen onSession={handleSession} />;
   if (view === "onboarding" && user) {
