@@ -40,6 +40,21 @@ def _random_address():
     return str(ipaddress.IPv4Address(random.getrandbits(32)))
 
 
+def _track_loop(function):
+    """Wrap function to record whether each call ran on the event loop thread."""
+    calls = []
+
+    def wrapper(*args, **kwargs):
+        try:
+            asyncio.get_running_loop()
+            calls.append("loop")
+        except RuntimeError:
+            calls.append("worker")
+        return function(*args, **kwargs)
+
+    return wrapper, calls
+
+
 class FakeLiveEngine:
     """Stand-in for ArgusLive that echoes text and records audio chunks."""
 
@@ -247,6 +262,60 @@ class HostedApiTests(unittest.TestCase):
     def test_login_rejects_oversized_passwords(self):
         response = self._login_from(_random_address(), "x" * 201)
         self.assertEqual(response.status_code, 422)
+
+    def test_password_hashing_and_lookups_run_off_the_event_loop(self):
+        import api.server
+
+        hash_wrapper, hashed = _track_loop(api.server.hash_password)
+        verify_wrapper, verified = _track_loop(api.server.verify_password)
+        with patch.object(api.server, "hash_password", hash_wrapper), \
+                patch.object(api.server, "verify_password", verify_wrapper):
+            email = f"loop-{uuid.uuid4().hex}@example.com"
+            response = self.client.post("/auth/signup", headers=_from(_random_address()), json={
+                "email": email, "password": "correct-horse-battery-staple", "display_name": "Loop",
+            })
+            self.assertEqual(response.status_code, 201, response.text)
+            created = response.json()["user"]["id"]
+            try:
+                response = self.client.post("/auth/login", headers=_from(_random_address()), json={
+                    "email": email, "password": "correct-horse-battery-staple",
+                })
+                self.assertEqual(response.status_code, 200, response.text)
+            finally:
+                with SessionLocal.begin() as db:
+                    db.execute(delete(User).where(User.id == created))
+        self.assertEqual(hashed, ["worker"])
+        self.assertEqual(verified, ["worker"])
+
+    def test_key_and_chat_storage_run_off_the_event_loop(self):
+        import api.server
+
+        save_wrapper, saved = _track_loop(api.server.set_user_secret)
+        with patch.object(api.server, "set_user_secret", save_wrapper):
+            response = self.client.post(
+                "/me/gemini-key",
+                headers=self.headers,
+                json={"api_key": "AIza" + "L" * 35, "validate": False},
+            )
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(saved, ["worker"])
+
+        read_wrapper, reads = _track_loop(api.server.get_user_secret)
+        add_wrapper, adds = _track_loop(api.server.add_chat_message)
+        with patch.object(api.server, "get_user_secret", read_wrapper), \
+                patch.object(api.server, "add_chat_message", add_wrapper):
+            response, _ = self._chat_with_gemini("Hi")
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(set(reads + adds), {"worker"})
+
+    def test_live_transcripts_are_stored_off_the_event_loop(self):
+        import api.repositories
+
+        add_wrapper, adds = _track_loop(api.repositories.add_chat_message)
+        with patch.object(api.repositories, "add_chat_message", add_wrapper):
+            socket = self._open_live_socket()
+            self._assert_session_alive(socket)
+        self.assertEqual(adds, ["worker"])
 
     def test_signups_are_limited_per_address(self):
         address = _random_address()
