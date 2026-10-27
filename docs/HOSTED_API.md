@@ -101,6 +101,19 @@ Email, flights, YouTube and every computer-control tool are desktop-only. Tools
 never fall back to the operator's `GEMINI_API_KEY` for a signed-in user, and
 tool arguments are not written to the server log.
 
+## Isolation between users
+
+- Every store (memory, keys, chat and task history, answer cache) is keyed by
+  the signed-in user. While the API runs it is in hosted mode: code that
+  reaches a store without a user in scope fails with `MissingTenantError`
+  instead of using the machine's shared files or the operator's
+  `GEMINI_API_KEY`.
+- Background tasks (research, presentations) are visible to and cancellable by
+  their owner only; each user may have 3 unfinished tasks, and users with
+  nothing running are served first.
+- Gemini quota cooldowns apply to the user whose key hit the limit.
+- The API container runs as an unprivileged user.
+
 ## Scaling
 
 Run **one API process on one machine**. The registry of live sessions (one per
