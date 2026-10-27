@@ -117,8 +117,8 @@ async def _retention_loop() -> None:
                 purge_expired_user_data,
                 settings.data_retention_days,
             )
-        except Exception as exc:
-            print(f"[Retention] Cleanup failed: {exc}")
+        except Exception:
+            logger.exception("Retention cleanup failed")
 
 
 @asynccontextmanager
@@ -131,8 +131,8 @@ async def lifespan(_: FastAPI):
             purge_expired_user_data,
             settings.data_retention_days,
         )
-    except Exception as exc:
-        print(f"[Retention] Initial cleanup failed: {exc}")
+    except Exception:
+        logger.exception("Initial retention cleanup failed")
     await limiter.connect()
     retention_task = asyncio.create_task(_retention_loop())
     try:
