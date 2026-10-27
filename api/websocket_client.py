@@ -4,12 +4,16 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import logging
+from concurrent.futures import Future, ThreadPoolExecutor
 from collections.abc import Callable
 from datetime import datetime, timezone
 from typing import Any
 
 from fastapi import WebSocket
 
+
+logger = logging.getLogger(__name__)
 
 _SPEAKER_PREFIXES = (("You: ", "user"), ("Argus: ", "assistant"))
 
@@ -25,6 +29,9 @@ class WebSocketClient:
         self._loop = asyncio.get_running_loop()
         self._events: asyncio.Queue[dict[str, Any] | None] = asyncio.Queue(maxsize=256)
         self._close_code: int | None = None
+        # One writer thread keeps transcript inserts in order and off the
+        # event loop that carries every user's audio.
+        self._history_writer = ThreadPoolExecutor(max_workers=1, thread_name_prefix="argus-history")
 
     def _enqueue(self, event: dict[str, Any] | None) -> None:
         if self._events.full():
@@ -46,10 +53,17 @@ class WebSocketClient:
                 role, content = speaker, content.removeprefix(prefix)
                 break
         if self.user_id and role in {"user", "assistant"}:
-            from .repositories import add_chat_message
-
-            add_chat_message(self.user_id, role, content)
+            self._store_history(role, content)
         self._emit({"type": "message", "role": role, "content": content})
+
+    def _store_history(self, role: str, content: str) -> None:
+        from . import repositories
+
+        try:
+            job = self._history_writer.submit(repositories.add_chat_message, self.user_id, role, content)
+        except RuntimeError:
+            return  # The session already closed; late engine output is dropped.
+        job.add_done_callback(_log_history_failure)
 
     def set_state(self, state: str) -> None:
         self.state = str(state).upper()
@@ -120,5 +134,12 @@ class WebSocketClient:
     async def close(self, code: int | None = None) -> None:
         """Stop sending after the queued events; with a code, also close the socket."""
         self._close_code = code
+        # Let queued transcript lines finish so the history is complete on close.
+        await asyncio.to_thread(self._history_writer.shutdown, True)
         # Scheduled like _emit so events emitted just before still go out first.
         self._loop.call_soon_threadsafe(self._enqueue, None)
+
+
+def _log_history_failure(job: Future) -> None:
+    if not job.cancelled() and job.exception() is not None:
+        logger.error("Could not store a live transcript line", exc_info=job.exception())

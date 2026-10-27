@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import importlib
 import binascii
 import json
 import logging
@@ -124,6 +125,9 @@ async def _retention_loop() -> None:
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     settings.validate_production()
+    # Importing the engine takes ~0.5 s; doing it here keeps the first /ws
+    # from freezing every other connection while it loads.
+    await asyncio.to_thread(importlib.import_module, "main")
     if settings.auto_create_tables:
         await asyncio.to_thread(init_db)
     try:
@@ -215,6 +219,12 @@ async def signup(
 ) -> SessionView:
     await limiter.consume(_client_ip(request), "signup_ip", 10, 3600)
     await limiter.consume(payload.email.lower(), "signup", 5, 3600)
+    return await asyncio.to_thread(_create_account, db, payload)
+
+
+# scrypt costs ~25 ms of CPU and the ORM is synchronous; both run in worker
+# threads so one sign-in cannot stall every live session on the event loop.
+def _create_account(db: Session, payload: UserCreate) -> SessionView:
     user = User(
         email=payload.email.lower().strip(),
         display_name=payload.display_name.strip(),
@@ -227,6 +237,19 @@ async def signup(
         db.rollback()
         raise HTTPException(status_code=409, detail="An account already exists for this email") from exc
     db.refresh(user)
+    return SessionView(
+        access_token=create_access_token(user.id, user.session_version),
+        user=_user_view(user, db),
+    )
+
+
+def _authenticate(db: Session, account: str, password: str) -> SessionView | None:
+    user = db.scalar(select(User).where(User.email == account))
+    if user is None:
+        verify_unknown_account(password)
+        return None
+    if not verify_password(password, user.password_hash):
+        return None
     return SessionView(
         access_token=create_access_token(user.id, user.session_version),
         user=_user_view(user, db),
@@ -252,16 +275,11 @@ async def login(
             detail="Too many failed sign-in attempts. Please try again later.",
             headers={"Retry-After": str(LOGIN_FAILURE_WINDOW)},
         )
-    user = db.scalar(select(User).where(User.email == account))
-    if user is None:
-        verify_unknown_account(payload.password)
-    if not user or not verify_password(payload.password, user.password_hash):
+    session = await asyncio.to_thread(_authenticate, db, account, payload.password)
+    if session is None:
         await limiter.record(account, "login_failures", LOGIN_FAILURE_WINDOW)
         raise HTTPException(status_code=401, detail="Email or password is incorrect")
-    return SessionView(
-        access_token=create_access_token(user.id, user.session_version),
-        user=_user_view(user, db),
-    )
+    return session
 
 
 @app.get("/auth/me", response_model=UserView)
@@ -288,7 +306,7 @@ async def save_gemini_key(
         validation = await asyncio.to_thread(validate_gemini_api_key, key)
         if not validation.valid:
             raise HTTPException(status_code=422, detail=validation.message)
-    set_user_secret(db, user.id, "gemini_api_key", key)
+    await asyncio.to_thread(set_user_secret, db, user.id, "gemini_api_key", key)
     return {"configured": True}
 
 
@@ -325,13 +343,13 @@ async def chat(
     db: Session = Depends(get_db),
 ) -> ChatResponse:
     await limiter.consume(user.id, "chat", 30, 60)
-    api_key = get_user_secret(db, user.id, "gemini_api_key")
+    api_key = await asyncio.to_thread(get_user_secret, db, user.id, "gemini_api_key")
     if not api_key:
         raise HTTPException(status_code=409, detail="Add a Gemini API key before starting ARGUS")
 
     with tenant_scope(user.id):
-        history = recent_chat_messages(user.id, limit=12)
-        memory = format_memory_for_prompt(load_memory())
+        history = await asyncio.to_thread(recent_chat_messages, user.id, limit=12)
+        memory = format_memory_for_prompt(await asyncio.to_thread(load_memory))
 
         def generate() -> str:
             from google import genai
@@ -369,9 +387,13 @@ async def chat(
             raise HTTPException(status_code=502, detail="Gemini returned an empty response")
         # Store the turn only once Gemini answers, so failures leave no
         # orphaned user message in the history sent with the next request.
-        add_chat_message(user.id, "user", payload.message)
-        add_chat_message(user.id, "assistant", response_text)
+        await asyncio.to_thread(_store_chat_turn, user.id, payload.message, response_text)
     return ChatResponse(response=response_text)
+
+
+def _store_chat_turn(user_id: str, message: str, reply: str) -> None:
+    add_chat_message(user_id, "user", message)
+    add_chat_message(user_id, "assistant", reply)
 
 
 # Browser microphone chunks are ~8 KiB of 16 kHz PCM; anything far larger is abuse.
@@ -426,6 +448,13 @@ async def _refuse_live_socket(websocket: WebSocket, close_code: int, code: str, 
     await websocket.close(code=close_code)
 
 
+def _live_session_owner(websocket: WebSocket) -> tuple[User, str | None]:
+    """Authenticate the socket and load the user's key in one short DB session."""
+    with SessionLocal() as db:
+        user = websocket_user(websocket, db)
+        return user, get_user_secret(db, user.id, "gemini_api_key")
+
+
 @app.websocket("/ws")
 async def live_socket(websocket: WebSocket) -> None:
     from main import ArgusLive
@@ -434,24 +463,22 @@ async def live_socket(websocket: WebSocket) -> None:
     # the browser as HTTP 403 / close code 1006, hiding the reason.
     offered = websocket.scope.get("subprotocols", [])
     await websocket.accept(subprotocol=WEBSOCKET_PROTOCOL if WEBSOCKET_PROTOCOL in offered else None)
-    with SessionLocal() as db:
-        try:
-            user = websocket_user(websocket, db)
-        except HTTPException as exc:
-            await _refuse_live_socket(websocket, WS_CLOSE_UNAUTHORIZED, "unauthorized", str(exc.detail))
-            return
-        try:
-            await limiter.consume(user.id, "websocket", 12, 60)
-        except HTTPException as exc:
-            await _refuse_live_socket(
-                websocket,
-                WS_CLOSE_RATE_LIMITED,
-                "rate_limited",
-                str(exc.detail),
-                retry_after=int((exc.headers or {}).get("Retry-After", 60)),
-            )
-            return
-        api_key = get_user_secret(db, user.id, "gemini_api_key")
+    try:
+        user, api_key = await asyncio.to_thread(_live_session_owner, websocket)
+    except HTTPException as exc:
+        await _refuse_live_socket(websocket, WS_CLOSE_UNAUTHORIZED, "unauthorized", str(exc.detail))
+        return
+    try:
+        await limiter.consume(user.id, "websocket", 12, 60)
+    except HTTPException as exc:
+        await _refuse_live_socket(
+            websocket,
+            WS_CLOSE_RATE_LIMITED,
+            "rate_limited",
+            str(exc.detail),
+            retry_after=int((exc.headers or {}).get("Retry-After", 60)),
+        )
+        return
 
     if not api_key:
         await _refuse_live_socket(
