@@ -48,8 +48,8 @@ export function AuthScreen({ onSession }: { onSession: (session: Session) => voi
 
       <section className="auth-panel" aria-labelledby="auth-title">
         <div className="mode-switch" role="tablist" aria-label="Account access">
-          <button role="tab" aria-selected={mode === "login"} onClick={() => setMode("login")}>Sign in</button>
-          <button role="tab" aria-selected={mode === "signup"} onClick={() => setMode("signup")}>Create account</button>
+          <button type="button" role="tab" aria-selected={mode === "login"} onClick={() => { setMode("login"); setError(""); }}>Sign in</button>
+          <button type="button" role="tab" aria-selected={mode === "signup"} onClick={() => { setMode("signup"); setError(""); }}>Create account</button>
         </div>
         <div>
           <p className="section-index">ACCESS / 01</p>
@@ -60,7 +60,7 @@ export function AuthScreen({ onSession }: { onSession: (session: Session) => voi
             <label>Display name<Input name="display_name" autoComplete="name" required placeholder="How ARGUS should address you" /></label>
           )}
           <label>Email<Input name="email" type="email" autoComplete="email" required placeholder="operator@example.com" /></label>
-          <label>Password<Input name="password" type="password" minLength={10} autoComplete={mode === "login" ? "current-password" : "new-password"} required placeholder="At least 10 characters" /></label>
+          <label>Password<Input name="password" type="password" minLength={mode === "signup" ? 10 : undefined} maxLength={200} autoComplete={mode === "login" ? "current-password" : "new-password"} required placeholder={mode === "signup" ? "At least 10 characters" : "Your password"} /></label>
           {error && <p className="form-error" role="alert">{error}</p>}
           <Button type="submit" disabled={pending} className="w-full">
             {pending ? "Authorizing" : mode === "login" ? "Enter ARGUS" : "Create secure account"}
