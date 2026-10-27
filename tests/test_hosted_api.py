@@ -363,6 +363,41 @@ class HostedApiTests(unittest.TestCase):
         self.assertNotIn("10.0.0.9", error["message"])
         self.assertEqual(socket.receive()["type"], "websocket.close")
 
+    def _rejected_socket(self, url):
+        """Connect to a socket the server refuses; return its error event and close code."""
+        from starlette.websockets import WebSocketDisconnect
+
+        with self.client.websocket_connect(url) as socket:
+            event = socket.receive_json()
+            with self.assertRaises(WebSocketDisconnect) as closed:
+                socket.receive_json()
+        return event, closed.exception.code
+
+    def test_websocket_rejects_missing_or_bad_tokens_with_4401(self):
+        for url in ("/ws", "/ws?token=not-a-token"):
+            event, code = self._rejected_socket(url)
+            self.assertEqual((event["type"], event["code"]), ("error", "unauthorized"), url)
+            self.assertEqual(code, 4401, url)
+
+    def test_websocket_reports_rate_limits_with_4429(self):
+        from api.rate_limit import limiter
+
+        real_consume = limiter.consume
+
+        async def consume(user_id, bucket, limit, window):
+            await real_consume(user_id, bucket, 0 if bucket == "websocket" else limit, window)
+
+        with patch.object(limiter, "consume", consume):
+            event, code = self._rejected_socket(f"/ws?token={self.access_token}")
+        self.assertEqual(event["code"], "rate_limited")
+        self.assertEqual(event["retry_after"], 60)
+        self.assertEqual(code, 4429)
+
+    def test_websocket_requires_a_gemini_key_with_4403(self):
+        event, code = self._rejected_socket(f"/ws?token={self.access_token}")
+        self.assertEqual(event["code"], "gemini_key_required")
+        self.assertEqual(code, 4403)
+
     def test_authenticated_websocket_streams_engine_events(self):
         raw_key = "AIza" + "B" * 35
         response = self.client.post(
