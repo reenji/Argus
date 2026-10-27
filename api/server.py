@@ -342,6 +342,7 @@ def _decode_live_audio(data: Any) -> bytes:
 
 WS_CLOSE_UNAUTHORIZED = 4401
 WS_CLOSE_GEMINI_KEY_REQUIRED = 4403
+WS_CLOSE_RATE_LIMITED = 4429
 
 
 async def _refuse_live_socket(websocket: WebSocket, close_code: int, code: str, message: str, **extra) -> None:
@@ -362,7 +363,17 @@ async def live_socket(websocket: WebSocket) -> None:
         except HTTPException as exc:
             await _refuse_live_socket(websocket, WS_CLOSE_UNAUTHORIZED, "unauthorized", str(exc.detail))
             return
-        await limiter.consume(user.id, "websocket", 12, 60)
+        try:
+            await limiter.consume(user.id, "websocket", 12, 60)
+        except HTTPException as exc:
+            await _refuse_live_socket(
+                websocket,
+                WS_CLOSE_RATE_LIMITED,
+                "rate_limited",
+                str(exc.detail),
+                retry_after=int((exc.headers or {}).get("Retry-After", 60)),
+            )
+            return
         api_key = get_user_secret(db, user.id, "gemini_api_key")
 
     if not api_key:
