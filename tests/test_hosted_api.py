@@ -58,10 +58,13 @@ def _track_loop(function):
 class FakeLiveEngine:
     """Stand-in for ArgusLive that echoes text and records audio chunks."""
 
+    instances = []
+
     def __init__(self, client, **_kwargs):
         self.client = client
         self.stopped = threading.Event()
         self.audio = []
+        FakeLiveEngine.instances.append(self)
 
     async def run(self):
         self.client.set_state("LISTENING")
@@ -81,6 +84,22 @@ class FakeLiveEngine:
 
     def _get_current_voice(self):
         return "puck"
+
+
+class FailingLiveEngine(FakeLiveEngine):
+    async def run(self):
+        raise RuntimeError("no Live model for this key")
+
+
+class FinishedLiveEngine(FakeLiveEngine):
+    async def run(self):
+        self.client.set_state("LISTENING")
+        await asyncio.sleep(0.05)
+
+
+class NotReadyLiveEngine(FakeLiveEngine):
+    async def send_text(self, text):
+        return False
 
 
 class HostedApiTests(unittest.TestCase):
@@ -323,11 +342,12 @@ class HostedApiTests(unittest.TestCase):
         with patch.object(api.repositories, "add_chat_message", add_wrapper):
             socket = self._open_live_socket()
             self._assert_session_alive(socket)
+            # The typed turn and the echoed reply are both stored.
             for _ in range(200):
-                if adds:
+                if len(adds) >= 2:
                     break
                 threading.Event().wait(0.01)
-        self.assertEqual(adds, ["worker"])
+        self.assertEqual(adds, ["worker", "worker"])
 
     def test_signups_are_limited_per_address(self):
         address = _random_address()
@@ -687,6 +707,72 @@ class HostedApiTests(unittest.TestCase):
         self.assertEqual({event["type"] for event in received}, {"ready", "status"})
         self._assert_session_alive(second)
 
+    def _live_socket_with(self, engine_class):
+        """Open /ws with engine_class as the engine; return the socket."""
+        response = self.client.post(
+            "/me/gemini-key",
+            headers=self.headers,
+            json={"api_key": "AIza" + "E" * 35, "validate": False},
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        import main
+
+        patcher = patch.object(main, "ArgusLive", engine_class)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        socket = self.client.websocket_connect("/ws", subprotocols=self._live_protocols()).__enter__()
+        self.addCleanup(socket.__exit__, None, None, None)
+        return socket
+
+    def _events_until_close(self, socket):
+        from starlette.websockets import WebSocketDisconnect
+
+        events = []
+        with self.assertRaises(WebSocketDisconnect) as closed:
+            for _ in range(20):
+                events.append(socket.receive_json())
+        return events, closed.exception.code
+
+    def test_a_failed_engine_reports_the_error_and_closes(self):
+        events, code = self._events_until_close(self._live_socket_with(FailingLiveEngine))
+        errors = [event for event in events if event["type"] == "error"]
+        self.assertEqual([event["code"] for event in errors], ["live_unavailable"])
+        self.assertEqual(code, 1011)
+
+    def test_a_finished_engine_ends_the_session(self):
+        events, code = self._events_until_close(self._live_socket_with(FinishedLiveEngine))
+        self.assertEqual(events[-1]["code"], "session_ended")
+        self.assertEqual(code, 4000)
+
+    def test_text_sent_before_the_engine_is_ready_is_reported(self):
+        socket = self._live_socket_with(NotReadyLiveEngine)
+        socket.receive_json(), socket.receive_json()
+        socket.send_json({"type": "text", "content": "too early"})
+        self.assertEqual(socket.receive_json()["code"], "not_ready")
+
+    def test_logout_and_key_removal_end_the_live_session(self):
+        socket = self._open_live_socket()
+        self.assertEqual(self.client.delete("/me/gemini-key", headers=self.headers).status_code, 204)
+        events, code = self._events_until_close(socket)
+        self.assertEqual((events[-1]["code"], code), ("gemini_key_required", 4403))
+
+        socket = self._open_live_socket()
+        self.assertEqual(self.client.post("/auth/logout", headers=self.headers).status_code, 204)
+        events, code = self._events_until_close(socket)
+        self.assertEqual((events[-1]["code"], code), ("unauthorized", 4401))
+
+    def test_mute_takes_a_boolean_and_stops_forwarding_audio(self):
+        socket = self._open_live_socket()
+        engine = FakeLiveEngine.instances[-1]
+        socket.send_json({"type": "mute", "muted": "false"})
+        self.assertEqual(socket.receive_json()["code"], "invalid_frame")
+        socket.send_json({"type": "mute", "muted": True})
+        self.assertEqual(socket.receive_json()["state"], "MUTED")
+        socket.send_bytes(b"\x01\x02")
+        socket.send_json({"type": "ping"})
+        self.assertEqual(socket.receive_json()["type"], "pong")
+        self.assertEqual(engine.audio, [])
+
     def test_authenticated_websocket_streams_engine_events(self):
         raw_key = "AIza" + "B" * 35
         response = self.client.post(
@@ -717,7 +803,7 @@ class HostedApiTests(unittest.TestCase):
             ).all()
         self.assertEqual(
             [(row.role, row.content) for row in stored],
-            [("assistant", "Echo: status report")],
+            [("user", "status report"), ("assistant", "Echo: status report")],
         )
 
 

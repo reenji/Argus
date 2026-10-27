@@ -29,6 +29,8 @@ class WebSocketClient:
         self._loop = asyncio.get_running_loop()
         self._events: asyncio.Queue[dict[str, Any] | None] = asyncio.Queue(maxsize=256)
         self._close_code: int | None = None
+        # Set by the engine when it stops for a reason reconnecting cannot fix.
+        self.terminal_error: tuple[str, str] | None = None
         # One writer thread keeps transcript inserts in order and off the
         # event loop that carries every user's audio.
         self._history_writer = ThreadPoolExecutor(max_workers=1, thread_name_prefix="argus-history")
@@ -64,6 +66,10 @@ class WebSocketClient:
         except RuntimeError:
             return  # The session already closed; late engine output is dropped.
         job.add_done_callback(_log_history_failure)
+
+    def report_error(self, code: str, message: str) -> None:
+        self.terminal_error = (code, message)
+        self._emit({"type": "error", "code": code, "message": message})
 
     def set_state(self, state: str) -> None:
         self.state = str(state).upper()
