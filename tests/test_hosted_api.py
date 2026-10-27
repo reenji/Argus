@@ -86,6 +86,99 @@ class HostedApiTests(unittest.TestCase):
         with tenant_scope(self.user_id):
             self.assertEqual(_api_key(), raw_key)
 
+    def _chat_with_gemini(self, outcome):
+        """Send /chat while Gemini answers with ``outcome`` (text or exception)."""
+        response = self.client.post(
+            "/me/gemini-key",
+            headers=self.headers,
+            json={"api_key": "AIza" + "C" * 35, "validate": False},
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        created = []
+
+        class FakeModels:
+            def generate_content(self, **_kwargs):
+                if isinstance(outcome, BaseException):
+                    raise outcome
+                return SimpleNamespace(text=outcome)
+
+        class FakeClient:
+            def __init__(self, **kwargs):
+                created.append(kwargs)
+                self.models = FakeModels()
+
+        with patch("google.genai.Client", FakeClient):
+            response = self.client.post(
+                "/chat", headers=self.headers, json={"message": "hello there"},
+            )
+        return response, created
+
+    def _stored_chat(self):
+        with SessionLocal() as db:
+            return [
+                (row.role, row.content)
+                for row in db.scalars(
+                    select(ChatMessage)
+                    .where(ChatMessage.user_id == self.user_id)
+                    .order_by(ChatMessage.created_at)
+                )
+            ]
+
+    def test_chat_stores_both_turns_and_bounds_the_gemini_call(self):
+        response, created = self._chat_with_gemini("General Kenobi")
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json()["response"], "General Kenobi")
+        self.assertEqual(
+            self._stored_chat(),
+            [("user", "hello there"), ("assistant", "General Kenobi")],
+        )
+        self.assertGreater(created[0]["http_options"].timeout, 0)
+
+    def test_chat_reports_a_rejected_gemini_key(self):
+        from google.genai import errors
+
+        response, _ = self._chat_with_gemini(errors.ClientError(400, {"error": {
+            "code": 400,
+            "message": "API key not valid. Please pass a valid API key.",
+            "status": "INVALID_ARGUMENT",
+        }}))
+        self.assertEqual(response.status_code, 409, response.text)
+        self.assertEqual(response.json()["detail"]["code"], "gemini_key_rejected")
+        self.assertEqual(self._stored_chat(), [])
+
+    def test_chat_reports_gemini_quota_limits(self):
+        from google.genai import errors
+
+        response, _ = self._chat_with_gemini(errors.ClientError(429, {"error": {
+            "code": 429, "message": "Quota exceeded", "status": "RESOURCE_EXHAUSTED",
+        }}))
+        self.assertEqual(response.status_code, 429, response.text)
+        self.assertEqual(response.json()["detail"]["code"], "gemini_quota_exceeded")
+        self.assertIn("Retry-After", response.headers)
+        self.assertEqual(self._stored_chat(), [])
+
+    def test_chat_reports_gemini_outages_and_timeouts(self):
+        import httpx
+        from google.genai import errors
+
+        response, _ = self._chat_with_gemini(errors.ServerError(503, {"error": {
+            "code": 503, "message": "overloaded", "status": "UNAVAILABLE",
+        }}))
+        self.assertEqual(response.status_code, 503, response.text)
+        self.assertEqual(response.json()["detail"]["code"], "gemini_unavailable")
+
+        response, _ = self._chat_with_gemini(httpx.ReadTimeout("timed out"))
+        self.assertEqual(response.status_code, 504, response.text)
+        self.assertEqual(response.json()["detail"]["code"], "gemini_timeout")
+        self.assertEqual(self._stored_chat(), [])
+
+    def test_chat_hides_unexpected_gemini_failures(self):
+        response, _ = self._chat_with_gemini(RuntimeError("socket at 10.0.0.7 reset"))
+        self.assertEqual(response.status_code, 502, response.text)
+        self.assertEqual(response.json()["detail"]["code"], "gemini_failed")
+        self.assertNotIn("10.0.0.7", response.text)
+        self.assertEqual(self._stored_chat(), [])
+
     def test_memory_is_scoped_by_tenant(self):
         with tenant_scope(self.user_id):
             update_memory({"identity": {"name": {"value": "Morgan"}}})
