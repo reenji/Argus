@@ -17,15 +17,14 @@ def _cipher() -> SecretCipher:
 
 
 def set_user_secret(db: Session, user_id: str, name: str, value: str) -> None:
-    encrypted = _cipher().encrypt(value)
-    row = db.scalar(select(UserSecret).where(
-        UserSecret.user_id == user_id,
-        UserSecret.name == name,
-    ))
-    if row:
-        row.encrypted_value = encrypted
-    else:
-        db.add(UserSecret(user_id=user_id, name=name, encrypted_value=encrypted))
+    from .repositories import upsert
+
+    upsert(
+        db, UserSecret,
+        {"user_id": user_id, "name": name, "encrypted_value": _cipher().encrypt(value)},
+        conflict=["user_id", "name"],
+        changes=["encrypted_value"],
+    )
     db.commit()
 
 

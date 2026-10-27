@@ -127,9 +127,32 @@ def update_memory(memory_update: dict) -> dict:
         return load_memory()
     memory = load_memory()
     if _recursive_update(memory, memory_update):
-        save_memory(memory)
+        from core.tenant import get_current_user_id
+
+        user_id = get_current_user_id()
+        if user_id:
+            _save_tenant_update(user_id, memory, memory_update)
+        else:
+            save_memory(memory)
         print(f"[Memory] 💾 Saved: {list(memory_update.keys())}")
     return memory
+
+
+def _save_tenant_update(user_id: str, memory: dict, memory_update: dict) -> None:
+    """Write only the touched entries, so concurrent updates cannot erase each other.
+
+    Rewriting the whole snapshot let two sessions that loaded the same memory
+    drop each other's new keys.
+    """
+    import copy
+
+    from api.repositories import delete_user_memory, flatten_memory, upsert_user_memory
+
+    current = flatten_memory(memory)
+    touched = flatten_memory(memory_update)
+    upsert_user_memory(user_id, {name: value for name, value in current.items() if name in touched})
+    trimmed = flatten_memory(_trim_to_limit(copy.deepcopy(memory)))
+    delete_user_memory(user_id, [name for name in current if name not in trimmed])
 
 def format_memory_for_prompt(memory: dict | None) -> str:
     if not memory:
@@ -219,9 +242,17 @@ def forget(key: str, category: str = "notes") -> str:
     memory = load_memory()
     cat    = memory.get(category, {})
     if key in cat:
-        del cat[key]
-        memory[category] = cat
-        save_memory(memory)
+        from core.tenant import get_current_user_id
+
+        user_id = get_current_user_id()
+        if user_id:
+            from api.repositories import delete_user_memory
+
+            delete_user_memory(user_id, [(category, key)])
+        else:
+            del cat[key]
+            memory[category] = cat
+            save_memory(memory)
         return f"Forgotten: {category}/{key}"
     return f"Not found: {category}/{key}"
 
