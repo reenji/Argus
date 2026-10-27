@@ -7,6 +7,7 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy.orm import Session
 
 from .database import get_db
+from .errors import api_error
 from .models import User
 from .security import decode_access_token
 
@@ -18,12 +19,12 @@ def _user_for_token(token: str, db: Session) -> User:
     try:
         payload = decode_access_token(token)
     except ValueError as exc:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=str(exc)) from exc
+        raise api_error(status.HTTP_401_UNAUTHORIZED, "unauthorized", str(exc)) from exc
     user = db.get(User, str(payload["sub"]))
     if not user:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Account not found")
+        raise api_error(status.HTTP_401_UNAUTHORIZED, "unauthorized", "Account not found")
     if int(payload.get("ver", 0)) != user.session_version:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or expired session")
+        raise api_error(status.HTTP_401_UNAUTHORIZED, "unauthorized", "Invalid or expired session")
     return user
 
 
@@ -32,7 +33,7 @@ def get_current_user(
     db: Session = Depends(get_db),
 ) -> User:
     if not credentials or credentials.scheme.lower() != "bearer":
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Authentication required")
+        raise api_error(status.HTTP_401_UNAUTHORIZED, "unauthorized", "Authentication required")
     return _user_for_token(credentials.credentials, db)
 
 
@@ -52,5 +53,5 @@ def websocket_user(websocket: WebSocket, db: Session) -> User:
         if authorization.lower().startswith("bearer "):
             token = authorization.split(" ", 1)[1].strip()
     if not token:
-        raise HTTPException(status_code=401, detail="Authentication required")
+        raise api_error(status.HTTP_401_UNAUTHORIZED, "unauthorized", "Authentication required")
     return _user_for_token(token, db)

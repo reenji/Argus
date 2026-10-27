@@ -26,6 +26,7 @@ from memory.memory_manager import format_memory_for_prompt, load_memory
 from .auth import WEBSOCKET_PROTOCOL, get_current_user, websocket_user
 from .config import settings
 from .database import SessionLocal, get_db, init_db
+from .errors import api_error
 from .gemini_errors import gemini_http_error
 from .models import User
 from .rate_limit import limiter
@@ -248,7 +249,7 @@ def _create_account(db: Session, payload: UserCreate) -> SessionView:
         db.commit()
     except IntegrityError as exc:
         db.rollback()
-        raise HTTPException(status_code=409, detail="An account already exists for this email") from exc
+        raise api_error(409, "account_exists", "An account already exists for this email") from exc
     db.refresh(user)
     return SessionView(
         access_token=create_access_token(user.id, user.session_version),
@@ -283,15 +284,16 @@ async def login(
     # Caps guessing spread over many addresses; only failures count.
     failures = await limiter.count(account, "login_failures", LOGIN_FAILURE_WINDOW)
     if failures >= LOGIN_FAILURES_PER_ACCOUNT:
-        raise HTTPException(
-            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-            detail="Too many failed sign-in attempts. Please try again later.",
+        raise api_error(
+            status.HTTP_429_TOO_MANY_REQUESTS,
+            "rate_limited",
+            "Too many failed sign-in attempts. Please try again later.",
             headers={"Retry-After": str(LOGIN_FAILURE_WINDOW)},
         )
     session = await asyncio.to_thread(_authenticate, db, account, payload.password)
     if session is None:
         await limiter.record(account, "login_failures", LOGIN_FAILURE_WINDOW)
-        raise HTTPException(status_code=401, detail="Email or password is incorrect")
+        raise api_error(401, "invalid_credentials", "Email or password is incorrect")
     return session
 
 
@@ -324,7 +326,7 @@ async def save_gemini_key(
     if payload.verify_key:
         validation = await asyncio.to_thread(validate_gemini_api_key, key)
         if not validation.valid:
-            raise HTTPException(status_code=422, detail=validation.message)
+            raise api_error(422, "gemini_key_invalid", validation.message)
     await asyncio.to_thread(set_user_secret, db, user.id, "gemini_api_key", key)
     # Restart a running live session so the engine and its tools use one key.
     await live_sessions.end(
@@ -378,7 +380,7 @@ async def chat(
     await limiter.consume(user.id, "chat", 30, 60)
     api_key = await asyncio.to_thread(get_user_secret, db, user.id, "gemini_api_key")
     if not api_key:
-        raise HTTPException(status_code=409, detail="Add a Gemini API key before starting ARGUS")
+        raise api_error(409, "gemini_key_required", "Add a Gemini API key before starting ARGUS")
 
     with tenant_scope(user.id):
         history = await asyncio.to_thread(recent_chat_messages, user.id, limit=12)
@@ -417,7 +419,7 @@ async def chat(
             logger.warning("Gemini chat failed for user %s: %r", user.id, exc)
             raise gemini_http_error(exc) from exc
         if not response_text:
-            raise HTTPException(status_code=502, detail="Gemini returned an empty response")
+            raise api_error(502, "gemini_empty_response", "Gemini returned an empty response")
         # Store the turn only once Gemini answers, so failures leave no
         # orphaned user message in the history sent with the next request.
         await asyncio.to_thread(_store_chat_turn, user.id, payload.message, response_text)
@@ -510,6 +512,11 @@ def _engine_finished(task: asyncio.Task, client: WebSocketClient) -> None:
     client.closing_task = asyncio.get_running_loop().create_task(client.close(code=close_code))
 
 
+def _error_message(exc: HTTPException) -> str:
+    detail = exc.detail
+    return str(detail.get("message", "")) if isinstance(detail, dict) else str(detail)
+
+
 def _live_session_owner(websocket: WebSocket) -> tuple[User, str | None]:
     """Authenticate the socket and load the user's key in one short DB session."""
     with SessionLocal() as db:
@@ -528,7 +535,7 @@ async def live_socket(websocket: WebSocket) -> None:
     try:
         user, api_key = await asyncio.to_thread(_live_session_owner, websocket)
     except HTTPException as exc:
-        await _refuse_live_socket(websocket, WS_CLOSE_UNAUTHORIZED, "unauthorized", str(exc.detail))
+        await _refuse_live_socket(websocket, WS_CLOSE_UNAUTHORIZED, "unauthorized", _error_message(exc))
         return
     try:
         await limiter.consume(user.id, "websocket", 12, 60)
@@ -537,7 +544,7 @@ async def live_socket(websocket: WebSocket) -> None:
             websocket,
             WS_CLOSE_RATE_LIMITED,
             "rate_limited",
-            str(exc.detail),
+            _error_message(exc),
             retry_after=int((exc.headers or {}).get("Retry-After", 60)),
         )
         return
@@ -637,7 +644,7 @@ async def live_socket(websocket: WebSocket) -> None:
             except HTTPException as exc:
                 if exc.status_code != status.HTTP_429_TOO_MANY_REQUESTS:
                     raise
-                client._emit({"type": "error", "code": "rate_limited", "message": exc.detail})
+                client._emit({"type": "error", "code": "rate_limited", "message": _error_message(exc)})
     except (WebSocketDisconnect, asyncio.CancelledError):
         pass
     except Exception:
