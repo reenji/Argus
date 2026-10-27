@@ -1,4 +1,5 @@
 import asyncio
+import base64
 import threading
 import unittest
 import uuid
@@ -23,6 +24,34 @@ from api.server import app
 from api.websocket_client import WebSocketClient
 from core.tenant import tenant_scope
 from memory.memory_manager import load_memory, update_memory
+
+
+class FakeLiveEngine:
+    """Stand-in for ArgusLive that echoes text and records audio chunks."""
+
+    def __init__(self, client, **_kwargs):
+        self.client = client
+        self.stopped = threading.Event()
+        self.audio = []
+
+    async def run(self):
+        self.client.set_state("LISTENING")
+        while not self.stopped.is_set():
+            await asyncio.sleep(0.01)
+
+    async def send_text(self, text):
+        self.client.write_log(f"Argus: Echo: {text}")
+        return True
+
+    async def send_audio_chunk(self, data, _mime_type="audio/pcm;rate=16000"):
+        self.audio.append(data)
+        return True
+
+    def request_shutdown(self):
+        self.stopped.set()
+
+    def _get_current_voice(self):
+        return "puck"
 
 
 class HostedApiTests(unittest.TestCase):
@@ -254,6 +283,57 @@ class HostedApiTests(unittest.TestCase):
 
         self.assertEqual(response.response["result"], f"tenant={self.user_id}")
 
+    def _open_live_socket(self):
+        response = self.client.post(
+            "/me/gemini-key",
+            headers=self.headers,
+            json={"api_key": "AIza" + "D" * 35, "validate": False},
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        import main
+
+        patcher = patch.object(main, "ArgusLive", FakeLiveEngine)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        socket = self.client.websocket_connect(f"/ws?token={self.access_token}").__enter__()
+        self.addCleanup(socket.__exit__, None, None, None)
+        received = [socket.receive_json(), socket.receive_json()]
+        self.assertEqual({event["type"] for event in received}, {"ready", "status"})
+        return socket
+
+    def _assert_session_alive(self, socket):
+        socket.send_json({"type": "text", "content": "still there?"})
+        message = socket.receive_json()
+        self.assertEqual(message["type"], "message")
+        self.assertEqual(message["content"], "Echo: still there?")
+
+    def test_websocket_rejects_malformed_frames_without_closing(self):
+        socket = self._open_live_socket()
+        for frame, code in (
+            ("not json", "invalid_frame"),
+            ("[1, 2]", "invalid_frame"),
+            ('{"type": "audio", "data": "***"}', "invalid_audio"),
+            ('{"type": "audio", "data": 42}', "invalid_audio"),
+            ('{"type": "teleport"}', "unknown_event"),
+        ):
+            socket.send_text(frame)
+            error = socket.receive_json()
+            self.assertEqual((error["type"], error["code"]), ("error", code), frame)
+        self._assert_session_alive(socket)
+
+    def test_websocket_limits_live_input_size(self):
+        from api.server import MAX_AUDIO_CHUNK_BYTES, MAX_LIVE_TEXT_CHARS
+
+        socket = self._open_live_socket()
+        socket.send_bytes(b"\x00" * (MAX_AUDIO_CHUNK_BYTES + 1))
+        self.assertEqual(socket.receive_json()["code"], "audio_too_large")
+        oversized = base64.b64encode(b"\x00" * (MAX_AUDIO_CHUNK_BYTES + 3)).decode()
+        socket.send_json({"type": "audio", "data": oversized})
+        self.assertEqual(socket.receive_json()["code"], "audio_too_large")
+        socket.send_json({"type": "text", "content": "x" * (MAX_LIVE_TEXT_CHARS + 1)})
+        self.assertEqual(socket.receive_json()["code"], "text_too_long")
+        self._assert_session_alive(socket)
+
     def test_authenticated_websocket_streams_engine_events(self):
         raw_key = "AIza" + "B" * 35
         response = self.client.post(
@@ -262,29 +342,6 @@ class HostedApiTests(unittest.TestCase):
             json={"api_key": raw_key, "validate": False},
         )
         self.assertEqual(response.status_code, 200, response.text)
-
-        class FakeLiveEngine:
-            def __init__(self, client, **_kwargs):
-                self.client = client
-                self.stopped = threading.Event()
-
-            async def run(self):
-                self.client.set_state("LISTENING")
-                while not self.stopped.is_set():
-                    await asyncio.sleep(0.01)
-
-            async def send_text(self, text):
-                self.client.write_log(f"Argus: Echo: {text}")
-                return True
-
-            async def send_audio_chunk(self, _data, _mime_type="audio/pcm;rate=16000"):
-                return True
-
-            def request_shutdown(self):
-                self.stopped.set()
-
-            def _get_current_voice(self):
-                return "puck"
 
         import main
 
