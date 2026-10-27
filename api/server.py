@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import binascii
+import json
 import logging
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
@@ -291,6 +293,34 @@ async def chat(
     return ChatResponse(response=response_text)
 
 
+class LiveFrameError(ValueError):
+    """A client frame that is rejected without ending the live session."""
+
+    def __init__(self, code: str, message: str):
+        super().__init__(message)
+        self.code = code
+        self.message = message
+
+
+def _parse_live_event(raw: str) -> dict:
+    try:
+        event = json.loads(raw)
+    except json.JSONDecodeError:
+        event = None
+    if not isinstance(event, dict):
+        raise LiveFrameError("invalid_frame", "Text frames must be JSON objects.")
+    return event
+
+
+def _decode_live_audio(data: Any) -> bytes:
+    if not isinstance(data, str):
+        raise LiveFrameError("invalid_audio", "Audio data must be base64 text.")
+    try:
+        return base64.b64decode(data, validate=True)
+    except (binascii.Error, ValueError) as exc:
+        raise LiveFrameError("invalid_audio", "Audio data must be base64 text.") from exc
+
+
 @app.websocket("/ws")
 async def live_socket(websocket: WebSocket) -> None:
     from main import ArgusLive
@@ -331,41 +361,49 @@ async def live_socket(websocket: WebSocket) -> None:
         "audio": {"input_rate": 16000, "output_rate": 24000, "encoding": "pcm_s16le"},
     })
 
+    async def handle_frame(message: dict) -> bool:
+        """Apply one client frame; return False when the client asked to close."""
+        if message.get("bytes") is not None:
+            await engine.send_audio_chunk(message["bytes"])
+            return True
+        raw = message.get("text")
+        if raw is None:
+            return True
+        event = _parse_live_event(raw)
+        event_type = event.get("type")
+        if event_type == "text":
+            await limiter.consume(user.id, "live_text", 60, 60)
+            with tenant_scope(user.id):
+                await engine.send_text(str(event.get("content", "")))
+        elif event_type == "audio":
+            await engine.send_audio_chunk(
+                _decode_live_audio(event.get("data", "")),
+                str(event.get("mime_type") or "audio/pcm;rate=16000"),
+            )
+        elif event_type == "mute":
+            client.muted = bool(event.get("muted", True))
+            client.set_state("MUTED" if client.muted else "LISTENING")
+        elif event_type == "ping":
+            client._emit({
+                "type": "pong",
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            })
+        elif event_type == "close":
+            return False
+        else:
+            raise LiveFrameError("unknown_event", "This event type is not supported.")
+        return True
+
     try:
         while True:
             message = await websocket.receive()
             if message["type"] == "websocket.disconnect":
                 break
-            if message.get("bytes") is not None:
-                await engine.send_audio_chunk(message["bytes"])
-                continue
-            raw = message.get("text")
-            if raw is None:
-                continue
-            import json
-
-            event = json.loads(raw)
-            event_type = event.get("type")
-            if event_type == "text":
-                await limiter.consume(user.id, "live_text", 60, 60)
-                with tenant_scope(user.id):
-                    await engine.send_text(str(event.get("content", "")))
-            elif event_type == "audio":
-                data = base64.b64decode(event.get("data", ""), validate=True)
-                await engine.send_audio_chunk(
-                    data,
-                    str(event.get("mime_type") or "audio/pcm;rate=16000"),
-                )
-            elif event_type == "mute":
-                client.muted = bool(event.get("muted", True))
-                client.set_state("MUTED" if client.muted else "LISTENING")
-            elif event_type == "ping":
-                client._emit({
-                    "type": "pong",
-                    "timestamp": datetime.now(timezone.utc).isoformat(),
-                })
-            elif event_type == "close":
-                break
+            try:
+                if not await handle_frame(message):
+                    break
+            except LiveFrameError as exc:
+                client._emit({"type": "error", "code": exc.code, "message": exc.message})
     except (WebSocketDisconnect, asyncio.CancelledError):
         pass
     except Exception as exc:
