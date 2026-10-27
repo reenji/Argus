@@ -16,10 +16,20 @@ message string; `/chat` failures from Gemini use `{"code", "message"}`:
 | 502 | `gemini_failed` | Any other Gemini failure; details are only in the server log. |
 
 Rate-limited requests answer 429 with a `Retry-After` header. Unexpected
-server errors answer 500 with `{"code": "internal_error", "message": ...}`;
+server errors answer 500 with `{"detail": {"code": "internal_error", "message": ...}}`;
 the stack trace is only in the server log.
 
 ## Live WebSocket (`/ws`)
+
+Browsers cannot set headers on a WebSocket, so the token travels as a
+subprotocol next to `argus.v1`, which the server selects:
+
+```js
+new WebSocket(`${API}/ws`, ["argus.v1", `bearer.${token}`]);
+```
+
+Non-browser clients may send `Authorization: Bearer <token>` instead. Tokens in
+the query string are not accepted.
 
 Problems with a single frame produce an event and the session continues:
 
@@ -29,7 +39,8 @@ Problems with a single frame produce an event and the session continues:
 
 | `code` | Cause |
 |---|---|
-| `invalid_frame` | A text frame that is not a JSON object. |
+| `invalid_frame` | A text frame that is not a JSON object, empty text, or a non-boolean `muted`. |
+| `not_ready` | Text sent before the engine connected to Gemini; resend shortly. |
 | `invalid_audio` | Audio `data` that is not base64 text. |
 | `audio_too_large` | An audio chunk over 64 KiB. |
 | `text_too_long` | A text message over 12000 characters. |
@@ -37,17 +48,19 @@ Problems with a single frame produce an event and the session continues:
 | `rate_limited` | Too many text messages; wait and resend. |
 
 When the server refuses or ends a session it sends an `error` event first
-(except on restart) and then closes the socket with one of these codes. Each
-account has one live session at a time:
+(except on server shutdown) and then closes the socket with one of these
+codes. Each account has one live session at a time on a server instance:
 
 | Close code | `code` | Client should |
 |---|---|---|
-| 4401 | `unauthorized` | Sign in again; do not reconnect with the same token. |
-| 4403 | `gemini_key_required` | Ask the user to add a Gemini API key. |
+| 4401 | `unauthorized` | Sign in again; sent for a bad token and after logout. |
+| 4403 | `gemini_key_required`, `gemini_key_rejected` | Ask the user to add or replace their Gemini API key. |
 | 4409 | `session_replaced` | Stop; the same account opened ARGUS in another window. |
-| 4429 | `rate_limited` | Reconnect after `retry_after` seconds. |
-| 1012 | — | The server is restarting; reconnect shortly. |
-| 1000 | `internal_error` | Reconnect; the failure is in the server log. |
+| 4429 | `rate_limited`, `gemini_quota_exceeded` | Reconnect after `retry_after` seconds (60 when absent). |
+| 4000 | `session_ended` | Stop; ARGUS ended the session (for example, the user asked it to quit). |
+| 1011 | `live_unavailable` | The engine failed; reconnect with backoff. |
+| 1012 | `session_restarted` or none | Reconnect shortly; the key changed or the server is restarting. |
+| 1000 | `internal_error` or none | Without an error event this is a normal close (the client sent `close`); with `internal_error`, reconnect. |
 
 ## Tools in the hosted app
 
