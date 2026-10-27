@@ -175,6 +175,29 @@ class HostedApiTests(unittest.TestCase):
             os.environ.pop("REDIS_REQUIRED", None)
             self.assertFalse(Settings().redis_required)
 
+    def test_production_refuses_weak_secrets_and_local_origins(self):
+        import dataclasses
+        from api.config import Settings
+
+        good = dataclasses.replace(
+            Settings(),
+            environment="production",
+            jwt_secret="j" * 32,
+            encryption_key="e" * 32,
+            database_url="postgresql://argus@db/argus",
+            cors_origins=("https://app.example.com",),
+        )
+        good.validate_production()
+        for change in (
+            {"jwt_secret": "short"},
+            {"encryption_key": "short"},
+            {"encryption_key": "j" * 32},
+            {"cors_origins": ()},
+            {"cors_origins": ("http://localhost:3000",)},
+        ):
+            with self.assertRaises(RuntimeError, msg=change):
+                dataclasses.replace(good, **change).validate_production()
+
     def test_unexpected_errors_return_json_without_internals(self):
         import api.server
 
