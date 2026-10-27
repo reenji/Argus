@@ -18,6 +18,7 @@ type Capture = {
 // Close codes sent by the /ws endpoint (api/server.py).
 const CLOSE_UNAUTHORIZED = 4401;
 const CLOSE_GEMINI_KEY_REQUIRED = 4403;
+const CLOSE_SESSION_REPLACED = 4409;
 const CLOSE_RATE_LIMITED = 4429;
 const RETRY_DELAY_MS = 2500;
 
@@ -115,6 +116,8 @@ export function useArgusSocket() {
         // Refusals that a retry cannot fix end the reconnect loop.
         if (event.code === CLOSE_UNAUTHORIZED) return setError("Your session expired. Sign in again.");
         if (event.code === CLOSE_GEMINI_KEY_REQUIRED) return setError("Your Gemini key needs attention.");
+        // Reconnecting would take the session back from the other window, and so on forever.
+        if (event.code === CLOSE_SESSION_REPLACED) return setError("ARGUS is open in another window. Reload to use it here.");
         if (desired.current) retry = setTimeout(connect, event.code === CLOSE_RATE_LIMITED ? retryDelay : RETRY_DELAY_MS);
       };
     }
