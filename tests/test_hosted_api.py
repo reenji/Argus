@@ -28,6 +28,13 @@ from core.tenant import tenant_scope
 from memory.memory_manager import load_memory, update_memory
 
 
+TEST_ADDRESS_HEADER = "X-Test-Client-IP"
+
+
+def _from(address):
+    return {TEST_ADDRESS_HEADER: address}
+
+
 def _random_address():
     """A fresh client IP, so rate-limit buckets never carry over between runs."""
     return str(ipaddress.IPv4Address(random.getrandbits(32)))
@@ -64,18 +71,31 @@ class FakeLiveEngine:
 class HostedApiTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
+        import dataclasses
+        import api.server
+
         init_db()
+        # Tests pick their client address with a header instead of separate
+        # TestClients: each TestClient runs its own event loop, and the shared
+        # Redis connection only works on the loop that opened it.
+        cls.address_patch = patch.object(
+            api.server,
+            "settings",
+            dataclasses.replace(api.server.settings, client_ip_header=TEST_ADDRESS_HEADER),
+        )
+        cls.address_patch.start()
         cls.client = TestClient(app)
         cls.context = cls.client.__enter__()
 
     @classmethod
     def tearDownClass(cls):
         cls.client.__exit__(None, None, None)
+        cls.address_patch.stop()
 
     def setUp(self):
         self.email = f"operator-{uuid.uuid4().hex}@example.com"
         # Each test signs up from its own address so per-IP signup limits never trip.
-        response = TestClient(app, client=(_random_address(), 50000)).post("/auth/signup", json={
+        response = self.client.post("/auth/signup", headers=_from(_random_address()), json={
             "email": self.email,
             "password": "correct-horse-battery-staple",
             "display_name": "Morgan",
@@ -104,8 +124,11 @@ class HostedApiTests(unittest.TestCase):
         self.assertEqual(decode_access_token(token)["sub"], self.user_id)
 
     def _login_from(self, address, password="wrong-password-123"):
-        client = TestClient(app, client=(address, 50000))
-        return client.post("/auth/login", json={"email": self.email, "password": password})
+        return self.client.post(
+            "/auth/login",
+            headers=_from(address),
+            json={"email": self.email, "password": password},
+        )
 
     def test_failed_logins_from_one_address_do_not_lock_out_others(self):
         attacker = _random_address()
@@ -121,8 +144,9 @@ class HostedApiTests(unittest.TestCase):
         with patch.object(
             api.server, "verify_unknown_account", wraps=api.server.verify_unknown_account,
         ) as check:
-            response = TestClient(app, client=(_random_address(), 50000)).post(
+            response = self.client.post(
                 "/auth/login",
+                headers=_from(_random_address()),
                 json={"email": f"ghost-{uuid.uuid4().hex}@example.com", "password": "whatever-123"},
             )
         self.assertEqual(response.status_code, 401)
@@ -133,10 +157,7 @@ class HostedApiTests(unittest.TestCase):
         self.assertEqual(self.client.post("/auth/logout", headers=self.headers).status_code, 204)
         self.assertEqual(self.client.get("/auth/me", headers=self.headers).status_code, 401)
 
-        response = TestClient(app, client=(_random_address(), 50000)).post(
-            "/auth/login",
-            json={"email": self.email, "password": "correct-horse-battery-staple"},
-        )
+        response = self._login_from(_random_address(), "correct-horse-battery-staple")
         self.assertEqual(response.status_code, 200, response.text)
         fresh = {"Authorization": f"Bearer {response.json()['access_token']}"}
         self.assertEqual(self.client.get("/auth/me", headers=fresh).status_code, 200)
@@ -153,6 +174,29 @@ class HostedApiTests(unittest.TestCase):
         with patch.dict(os.environ, {"ARGUS_ENV": "development"}):
             os.environ.pop("REDIS_REQUIRED", None)
             self.assertFalse(Settings().redis_required)
+
+    def test_production_refuses_weak_secrets_and_local_origins(self):
+        import dataclasses
+        from api.config import Settings
+
+        good = dataclasses.replace(
+            Settings(),
+            environment="production",
+            jwt_secret="j" * 32,
+            encryption_key="e" * 32,
+            database_url="postgresql://argus@db/argus",
+            cors_origins=("https://app.example.com",),
+        )
+        good.validate_production()
+        for change in (
+            {"jwt_secret": "short"},
+            {"encryption_key": "short"},
+            {"encryption_key": "j" * 32},
+            {"cors_origins": ()},
+            {"cors_origins": ("http://localhost:3000",)},
+        ):
+            with self.assertRaises(RuntimeError, msg=change):
+                dataclasses.replace(good, **change).validate_production()
 
     def test_unexpected_errors_return_json_without_internals(self):
         import api.server
@@ -171,6 +215,7 @@ class HostedApiTests(unittest.TestCase):
         import api.server
         from starlette.requests import Request
 
+        overrides.setdefault("client_ip_header", "")
         request = Request({
             "type": "http",
             "headers": [(k.lower().encode(), v.encode()) for k, v in headers.items()],
@@ -204,11 +249,11 @@ class HostedApiTests(unittest.TestCase):
         self.assertEqual(response.status_code, 422)
 
     def test_signups_are_limited_per_address(self):
-        client = TestClient(app, client=(_random_address(), 50000))
+        address = _random_address()
         created = []
         try:
             for index in range(11):
-                response = client.post("/auth/signup", json={
+                response = self.client.post("/auth/signup", headers=_from(address), json={
                     "email": f"bulk-{index}-{uuid.uuid4().hex}@example.com",
                     "password": "correct-horse-battery-staple",
                     "display_name": "Bulk",

@@ -14,6 +14,9 @@ def _csv(name: str, default: str) -> tuple[str, ...]:
     )
 
 
+MIN_SECRET_LENGTH = 32
+
+
 @dataclass(frozen=True)
 class Settings:
     environment: str = os.environ.get("ARGUS_ENV", "development").lower()
@@ -53,12 +56,22 @@ class Settings:
             raise RuntimeError("ARGUS_CHAT_TIMEOUT_SECONDS must be positive")
         if self.environment != "production":
             return
-        if self.jwt_secret == "local-development-only-change-me":
-            raise RuntimeError("JWT_SECRET must be configured in production")
-        if not self.encryption_key:
-            raise RuntimeError("ARGUS_ENCRYPTION_KEY must be configured in production")
+        if self.jwt_secret == "local-development-only-change-me" or len(self.jwt_secret) < MIN_SECRET_LENGTH:
+            raise RuntimeError(f"JWT_SECRET must be at least {MIN_SECRET_LENGTH} characters in production")
+        if len(self.encryption_key) < MIN_SECRET_LENGTH:
+            raise RuntimeError(
+                f"ARGUS_ENCRYPTION_KEY must be at least {MIN_SECRET_LENGTH} characters in production"
+            )
+        if self.encryption_key == self.jwt_secret:
+            raise RuntimeError("ARGUS_ENCRYPTION_KEY must differ from JWT_SECRET")
         if not self.database_url.startswith(("postgresql://", "postgres://", "postgresql+")):
             raise RuntimeError("Production DATABASE_URL must point to Postgres")
+        # The default only allows local dev servers; a deploy that forgot
+        # CORS_ORIGINS would start healthy while every browser call fails.
+        if not self.cors_origins or any(
+            not origin.startswith("https://") for origin in self.cors_origins
+        ):
+            raise RuntimeError("Production CORS_ORIGINS must list the web app's https origins")
 
 
 settings = Settings()

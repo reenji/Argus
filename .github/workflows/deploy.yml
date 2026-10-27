@@ -3,17 +3,26 @@ name: Deploy
 on:
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
   backend:
+    # Production only ships main; the environment holds the deploy secrets
+    # and is where required reviewers can be configured.
+    if: github.ref == 'refs/heads/main'
+    environment: production
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: superfly/flyctl-actions/setup-flyctl@master
+      - uses: superfly/flyctl-actions/setup-flyctl@ed8efb33836e8b2096c7fd3ba1c8afe303ebbff1 # 1.6
       - run: flyctl deploy --remote-only
         env:
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
 
   frontend:
+    if: github.ref == 'refs/heads/main'
+    environment: production
     runs-on: ubuntu-latest
     env:
       VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
@@ -26,6 +35,8 @@ jobs:
       - uses: actions/setup-node@v4
         with: { node-version: 24, cache: npm, cache-dependency-path: web/package-lock.json }
       - run: npm ci
-      - run: npx vercel pull --yes --environment=production --token="$VERCEL_TOKEN"
-      - run: npx vercel build --prod --token="$VERCEL_TOKEN"
-      - run: npx vercel deploy --prebuilt --prod --token="$VERCEL_TOKEN"
+      # The CLI reads VERCEL_TOKEN from the environment; passing --token would
+      # put it on the process command line.
+      - run: npx --yes vercel@63.1.2 pull --yes --environment=production
+      - run: npx --yes vercel@63.1.2 build --prod
+      - run: npx --yes vercel@63.1.2 deploy --prebuilt --prod
