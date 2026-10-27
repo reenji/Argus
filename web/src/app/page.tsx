@@ -69,6 +69,8 @@ export default function Home() {
   if (view === "onboarding" && user) {
     return <Onboarding user={user} onComplete={() => setView("console")} onSignOut={signOut} />;
   }
-  if (view === "console" && user) return <ArgusConsole user={user} onSignOut={signOut} />;
+  if (view === "console" && user) {
+    return <ArgusConsole user={user} onSignOut={signOut} onReplaceKey={() => setView("onboarding")} />;
+  }
   return null;
 }
