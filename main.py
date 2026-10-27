@@ -1146,9 +1146,6 @@ CLOUD_SAFE_ACTIONS = frozenset({
     "deep_research",
     "code_generator",
     "create_presentation",
-    "flight_finder",
-    "email_control",
-    "youtube_video",
 })
 
 LOCAL_MACHINE_ONLY_ACTIONS = frozenset({
