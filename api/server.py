@@ -340,27 +340,38 @@ def _decode_live_audio(data: Any) -> bytes:
     return audio
 
 
+WS_CLOSE_UNAUTHORIZED = 4401
+WS_CLOSE_GEMINI_KEY_REQUIRED = 4403
+
+
+async def _refuse_live_socket(websocket: WebSocket, close_code: int, code: str, message: str, **extra) -> None:
+    await websocket.send_json({"type": "error", "code": code, "message": message, **extra})
+    await websocket.close(code=close_code)
+
+
 @app.websocket("/ws")
 async def live_socket(websocket: WebSocket) -> None:
     from main import ArgusLive
 
+    # Accept before refusing: a socket closed during the handshake reaches
+    # the browser as HTTP 403 / close code 1006, hiding the reason.
+    await websocket.accept()
     with SessionLocal() as db:
         try:
             user = websocket_user(websocket, db)
-            await limiter.consume(user.id, "websocket", 12, 60)
-            api_key = get_user_secret(db, user.id, "gemini_api_key")
         except HTTPException as exc:
-            await websocket.close(code=4401, reason=str(exc.detail))
+            await _refuse_live_socket(websocket, WS_CLOSE_UNAUTHORIZED, "unauthorized", str(exc.detail))
             return
+        await limiter.consume(user.id, "websocket", 12, 60)
+        api_key = get_user_secret(db, user.id, "gemini_api_key")
 
-    await websocket.accept()
     if not api_key:
-        await websocket.send_json({
-            "type": "error",
-            "code": "gemini_key_required",
-            "message": "Add a Gemini API key before starting ARGUS.",
-        })
-        await websocket.close(code=4403)
+        await _refuse_live_socket(
+            websocket,
+            WS_CLOSE_GEMINI_KEY_REQUIRED,
+            "gemini_key_required",
+            "Add a Gemini API key before starting ARGUS.",
+        )
         return
 
     client = WebSocketClient(websocket, user.id)
