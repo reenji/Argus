@@ -13,6 +13,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from fastapi import Depends, FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect, status
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from sqlalchemy import select
@@ -174,6 +175,23 @@ app.add_middleware(
     allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
     allow_headers=["Authorization", "Content-Type"],
 )
+
+
+@app.exception_handler(RequestValidationError)
+async def invalid_request(_: Request, exc: RequestValidationError) -> JSONResponse:
+    # Pydantic's list of errors becomes the usual shape plus the field names.
+    errors = exc.errors()
+    fields = sorted({
+        str(error["loc"][-1])
+        for error in errors
+        if error.get("loc") and error["loc"][0] == "body" and len(error["loc"]) > 1
+    })
+    first = errors[0].get("msg", "Invalid request") if errors else "Invalid request"
+    message = f"{fields[0]}: {first}" if fields else str(first)
+    return JSONResponse(
+        status_code=422,
+        content={"detail": {"code": "invalid_request", "message": message, "fields": fields}},
+    )
 
 
 @app.exception_handler(Exception)
