@@ -1590,7 +1590,11 @@ class ArgusLive:
                 response={"result": qa_block_message(qa_decision)},
             )
 
-        print(f"[ARGUS] 🔧 {name}  {args}")
+        if getattr(self, "cloud_safe", False):
+            # Arguments carry user content (questions, drafts); keep it out of server logs.
+            print(f"[ARGUS] 🔧 {name}")
+        else:
+            print(f"[ARGUS] 🔧 {name}  {args}")
         self.ui.set_state("THINKING")
 
         intercepted = self._intercept_ui_tool_call(name, args)

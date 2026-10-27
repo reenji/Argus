@@ -85,6 +85,19 @@ class CloudToolPolicyTests(unittest.TestCase):
         self.assertIn("read the report aloud", response.response["result"])
 
 
+class CloudLoggingTests(unittest.TestCase):
+    def test_tool_arguments_stay_out_of_server_logs(self):
+        import contextlib
+        import io
+
+        output = io.StringIO()
+        with patch.object(main, "web_search_action", return_value="ok"):
+            with contextlib.redirect_stdout(output):
+                _run_tool(_cloud_engine(), "web_search", {"query": "my private medical question"})
+        self.assertIn("web_search", output.getvalue())
+        self.assertNotIn("private medical", output.getvalue())
+
+
 class TenantKeyTests(unittest.TestCase):
     def test_tools_never_fall_back_to_the_operator_key_for_a_tenant(self):
         from actions import deep_research, web_search
