@@ -154,6 +154,39 @@ class HostedApiTests(unittest.TestCase):
             os.environ.pop("REDIS_REQUIRED", None)
             self.assertFalse(Settings().redis_required)
 
+    def _client_ip_for(self, headers, address="10.1.2.3", **overrides):
+        import dataclasses
+        import api.server
+        from starlette.requests import Request
+
+        request = Request({
+            "type": "http",
+            "headers": [(k.lower().encode(), v.encode()) for k, v in headers.items()],
+            "client": (address, 50000),
+        })
+        with patch.object(api.server, "settings", dataclasses.replace(api.server.settings, **overrides)):
+            return api.server._client_ip(request)
+
+    def test_client_ip_ignores_forwarded_headers_by_default(self):
+        self.assertEqual(self._client_ip_for({"X-Forwarded-For": "6.6.6.6"}), "10.1.2.3")
+
+    def test_client_ip_uses_the_configured_platform_header(self):
+        headers = {"Fly-Client-IP": "198.51.100.8", "X-Forwarded-For": "6.6.6.6"}
+        self.assertEqual(self._client_ip_for(headers, client_ip_header="Fly-Client-IP"), "198.51.100.8")
+
+    def test_client_ip_takes_the_hop_added_by_trusted_proxies(self):
+        headers = {"X-Forwarded-For": "6.6.6.6, 198.51.100.8"}
+        self.assertEqual(self._client_ip_for(headers, trusted_proxy_hops=1), "198.51.100.8")
+        self.assertEqual(self._client_ip_for({}, trusted_proxy_hops=1), "10.1.2.3")
+
+    def test_failed_logins_are_capped_per_account_across_addresses(self):
+        from api.server import LOGIN_FAILURES_PER_ACCOUNT
+
+        for _ in range(LOGIN_FAILURES_PER_ACCOUNT):
+            self.assertEqual(self._login_from(_random_address()).status_code, 401)
+        response = self._login_from(_random_address(), "correct-horse-battery-staple")
+        self.assertEqual(response.status_code, 429, response.text)
+
     def test_signups_are_limited_per_address(self):
         client = TestClient(app, client=(_random_address(), 50000))
         created = []
