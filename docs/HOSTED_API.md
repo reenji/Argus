@@ -47,6 +47,13 @@ new WebSocket(`${API}/ws`, ["argus.v1", `bearer.${token}`]);
 Non-browser clients may send `Authorization: Bearer <token>` instead. Tokens in
 the query string are not accepted.
 
+The server streams JSON events: `ready`, `status` (sent when the state
+changes), `message`, `transcript`, `transcript_clear`, `audio` (base64 PCM with
+its `mime_type`), `audio_clear` (stop playing queued reply audio; the user
+interrupted), `progress`, `progress_end`, `progress_hide`, `pong` and `error`.
+When a client falls behind, queued `audio` events are dropped before any other
+event.
+
 Problems with a single frame produce an event and the session continues:
 
 ```json

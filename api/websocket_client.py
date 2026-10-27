@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import logging
+from collections import deque
 from concurrent.futures import Future, ThreadPoolExecutor
 from collections.abc import Callable
 from datetime import datetime, timezone
@@ -16,6 +17,7 @@ from fastapi import WebSocket
 logger = logging.getLogger(__name__)
 
 _SPEAKER_PREFIXES = (("You: ", "user"), ("Argus: ", "assistant"))
+MAX_PENDING_EVENTS = 256
 
 class WebSocketClient:
     def __init__(self, websocket: WebSocket, user_id: str | None = None):
@@ -27,7 +29,9 @@ class WebSocketClient:
         self._voice_combo = None
         self.state = "CONNECTING"
         self._loop = asyncio.get_running_loop()
-        self._events: asyncio.Queue[dict[str, Any] | None] = asyncio.Queue(maxsize=256)
+        # Pending outgoing events; None ends the sender. Touched only on the loop.
+        self._events: deque[dict[str, Any] | None] = deque()
+        self._events_ready = asyncio.Event()
         self._close_code: int | None = None
         # Set by the engine when it stops for a reason reconnecting cannot fix.
         self.terminal_error: tuple[str, str] | None = None
@@ -36,12 +40,23 @@ class WebSocketClient:
         self._history_writer = ThreadPoolExecutor(max_workers=1, thread_name_prefix="argus-history")
 
     def _enqueue(self, event: dict[str, Any] | None) -> None:
-        if self._events.full():
-            try:
-                self._events.get_nowait()
-            except asyncio.QueueEmpty:
-                pass
-        self._events.put_nowait(event)
+        if len(self._events) >= MAX_PENDING_EVENTS:
+            # A slow browser loses the oldest audio first; status, messages
+            # and errors are what keep the UI truthful.
+            for index, pending in enumerate(self._events):
+                if pending is not None and pending.get("type") == "audio":
+                    del self._events[index]
+                    break
+            else:
+                self._events.popleft()
+        self._events.append(event)
+        self._events_ready.set()
+
+    def _clear_audio(self) -> None:
+        kept = [event for event in self._events if event is None or event.get("type") != "audio"]
+        self._events.clear()
+        self._events.extend(kept)
+        self._enqueue({"type": "audio_clear", "timestamp": datetime.now(timezone.utc).isoformat()})
 
     def _emit(self, event: dict[str, Any]) -> None:
         event.setdefault("timestamp", datetime.now(timezone.utc).isoformat())
@@ -70,6 +85,10 @@ class WebSocketClient:
     def report_error(self, code: str, message: str) -> None:
         self.terminal_error = (code, message)
         self._emit({"type": "error", "code": code, "message": message})
+
+    def interrupt_audio(self) -> None:
+        """Drop reply audio not yet sent and tell the browser to stop playback."""
+        self._loop.call_soon_threadsafe(self._clear_audio)
 
     def set_state(self, state: str) -> None:
         self.state = str(state).upper()
@@ -126,7 +145,10 @@ class WebSocketClient:
 
     async def send_events(self) -> None:
         while True:
-            event = await self._events.get()
+            while not self._events:
+                self._events_ready.clear()
+                await self._events_ready.wait()
+            event = self._events.popleft()
             try:
                 if event is None:
                     if self._close_code is not None:

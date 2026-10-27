@@ -1328,7 +1328,11 @@ class ArgusLive:
 
     def set_speaking(self, value: bool):
         with self._speaking_lock:
+            changed = self._is_speaking != value
             self._is_speaking = value
+        # Called for every audio chunk; only a change is worth a status event.
+        if not changed:
+            return
         if value:
             self.ui.set_state("SPEAKING")
         elif not self.ui.muted:
@@ -1920,6 +1924,16 @@ class ArgusLive:
 
                     if response.server_content:
                         sc = response.server_content
+
+                        if getattr(sc, "interrupted", False):
+                            # The user talked over ARGUS: drop the rest of the reply
+                            # here and in the browser's playback queue.
+                            while not self.audio_in_queue.empty():
+                                self.audio_in_queue.get_nowait()
+                            interrupt_audio = getattr(self.ui, "interrupt_audio", None)
+                            if callable(interrupt_audio):
+                                interrupt_audio()
+                            self.set_speaking(False)
 
                         if sc.output_transcription and sc.output_transcription.text:
                             txt = _clean_transcript(sc.output_transcription.text)
