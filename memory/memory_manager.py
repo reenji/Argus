@@ -34,6 +34,9 @@ def load_memory() -> dict:
         from api.repositories import load_user_memory
 
         return load_user_memory(user_id)
+    from core.tenant import require_local_storage
+
+    require_local_storage("memory")
     if not MEMORY_PATH.exists():
         return _empty_memory()
     with _lock:
@@ -85,6 +88,9 @@ def save_memory(memory: dict) -> None:
 
         replace_user_memory(user_id, memory)
         return
+    from core.tenant import require_local_storage
+
+    require_local_storage("memory")
     MEMORY_PATH.parent.mkdir(parents=True, exist_ok=True)
     with _lock:
         MEMORY_PATH.write_text(

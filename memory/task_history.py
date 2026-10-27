@@ -71,6 +71,9 @@ def record_task(
         db_entry.pop("timestamp", None)
         return add_task_record(user_id, db_entry)
 
+    from core.tenant import require_local_storage
+
+    require_local_storage("task history")
     items = _load()
 
     items.append(entry)
@@ -86,6 +89,9 @@ def get_history(limit: int = 10, status: str | None = None) -> list[dict]:
         from api.repositories import task_history
 
         return task_history(user_id, limit=limit, status=status)
+    from core.tenant import require_local_storage
+
+    require_local_storage("task history")
     items = _load()
     if status:
         items = [x for x in items if x.get("status") == status]

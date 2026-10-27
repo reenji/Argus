@@ -131,6 +131,9 @@ def get_secret_store() -> SecretStore:
     user_id = get_current_user_id()
     if user_id:
         return TenantDatabaseSecretStore(user_id)
+    from core.tenant import require_local_storage
+
+    require_local_storage("secret store")
     global _store
     if _store is not None:
         return _store

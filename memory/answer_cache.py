@@ -100,6 +100,9 @@ def get_cached_answer(question: str) -> str | None:
 
         return get_cached(user_id, key)
 
+    from core.tenant import require_local_storage
+
+    require_local_storage("answer cache")
     data = _load_cache()
     entry = data.get(key)
     if not isinstance(entry, dict):
@@ -136,6 +139,9 @@ def save_cached_answer(question: str, answer: str) -> None:
 
         put_cached(user_id, key, str(question or "").strip(), clean_answer)
         return
+    from core.tenant import require_local_storage
+
+    require_local_storage("answer cache")
     data = _load_cache()
     existing = data.get(key, {}) if isinstance(data.get(key), dict) else {}
     data[key] = {

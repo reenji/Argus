@@ -21,7 +21,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from core.api_key_validator import normalize_gemini_api_key, validate_gemini_api_key
-from core.tenant import tenant_scope
+from core.tenant import disable_hosted_mode, enable_hosted_mode, tenant_scope
 from memory.memory_manager import format_memory_for_prompt, load_memory
 
 from .auth import WEBSOCKET_PROTOCOL, get_current_user, websocket_user
@@ -140,6 +140,7 @@ async def _retention_loop() -> None:
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     settings.validate_production()
+    enable_hosted_mode()
     # Importing the engine takes ~0.5 s; doing it here keeps the first /ws
     # from freezing every other connection while it loads.
     await asyncio.to_thread(importlib.import_module, "main")
@@ -161,6 +162,7 @@ async def lifespan(_: FastAPI):
         await asyncio.gather(retention_task, return_exceptions=True)
         await live_sessions.close_all()
         await limiter.close()
+        disable_hosted_mode()
 
 
 app = FastAPI(
