@@ -9,6 +9,8 @@ import re
 class ApiKeyValidationResult:
     valid: bool
     message: str
+    # True when Gemini could not be asked (timeout, outage), not when it said no.
+    retryable: bool = False
 
 
 def describe_api_key_for_log(api_key: str) -> str:
@@ -157,7 +159,8 @@ def _validate_with_gemini(api_key: str, timeout_seconds: float) -> ApiKeyValidat
             )
         return ApiKeyValidationResult(
             False,
-            f"Gemini could not verify this key. Check your connection and try again. ({text[:120]})",
+            "Gemini could not verify this key right now. Check your connection and try again.",
+            retryable=True,
         )
 
 
@@ -176,6 +179,7 @@ def validate_gemini_api_key(api_key: str, timeout_seconds: float = 8.0) -> ApiKe
         return ApiKeyValidationResult(
             False,
             "Gemini validation timed out. Check your connection and try again; the key was not saved.",
+            retryable=True,
         )
     finally:
         executor.shutdown(wait=False, cancel_futures=True)

@@ -371,8 +371,14 @@ async def save_gemini_key(
 ) -> dict:
     await limiter.consume(user.id, "secret", 8, 3600)
     key = normalize_gemini_api_key(payload.api_key)
+    # The schema checks length before normalization strips spaces and
+    # zero-width characters, so check again on what will be stored.
+    if len(key) < 20:
+        raise api_error(422, "gemini_key_invalid", "Paste the raw API key created in Google AI Studio.")
     if payload.verify_key:
         validation = await asyncio.to_thread(validate_gemini_api_key, key)
+        if not validation.valid and validation.retryable:
+            raise api_error(503, "gemini_unavailable", validation.message)
         if not validation.valid:
             raise api_error(422, "gemini_key_invalid", validation.message)
     await asyncio.to_thread(set_user_secret, db, user.id, "gemini_api_key", key)
