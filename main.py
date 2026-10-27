@@ -164,6 +164,20 @@ def _is_transient_live_connection_error(exc: BaseException) -> bool:
     )
 
 
+def _terminal_live_error(exc: BaseException) -> tuple[str, str] | None:
+    """(code, message) for failures that reconnecting cannot fix."""
+    for leaf in _exception_leaves(exc):
+        if not isinstance(leaf, genai.errors.APIError):
+            continue
+        code = int(getattr(leaf, "code", 0) or 0)
+        text = f"{getattr(leaf, 'status', '') or ''} {getattr(leaf, 'message', '') or ''}".lower()
+        if code in {401, 403} or "api key not valid" in text or "api_key_invalid" in text:
+            return "gemini_key_rejected", "Gemini rejected your API key. Update it in settings."
+        if code == 429:
+            return "gemini_quota_exceeded", "Your Gemini quota is used up for now. Please try again later."
+    return None
+
+
 def _live_reconnect_delay(attempt: int) -> float:
     return min(30.0, float(2 ** max(0, int(attempt) - 1)))
 
@@ -2045,6 +2059,7 @@ class ArgusLive:
         self.ui.write_log(f"SYS: Gemini Live model selected: {live_model_id}")
 
         start_time = time.time()
+        failed_attempts = 0
         while True:
             if self._shutdown_requested.is_set():
                 return
@@ -2094,6 +2109,7 @@ class ArgusLive:
                     self.out_queue      = asyncio.Queue(maxsize=10)
                     self._turn_done_event = asyncio.Event()
 
+                    failed_attempts = 0
                     print("[ARGUS] ✅ Connected.")
                     self.ui.set_state("LISTENING")
                     self.ui.write_log("SYS: ARGUS online.")
@@ -2121,6 +2137,18 @@ class ArgusLive:
                 if isinstance(e, ExceptionGroup) and len(e.exceptions) == 1:
                     actual = e.exceptions[0]
 
+                terminal = _terminal_live_error(actual)
+                if terminal is not None:
+                    # A rejected key or exhausted quota fails the same way on
+                    # every retry; tell the user instead of hammering Gemini.
+                    print(f"[ARGUS] ⛔ {terminal[0]}: {actual}")
+                    report_error = getattr(self.ui, "report_error", None)
+                    if callable(report_error):
+                        report_error(*terminal)
+                    else:
+                        self.ui.write_log(f"SYS: {terminal[1]}")
+                    return
+
                 if _is_unsupported_voice_error(actual) and self.voice_name != DEFAULT_VOICE_NAME:
                     old_voice = self.voice_name
                     self.voice_name = DEFAULT_VOICE_NAME
@@ -2141,9 +2169,13 @@ class ArgusLive:
                             argus_status.write_status({"state": "offline"})
                         except Exception:
                             pass
+                    failed_attempts += 1
+                    await self._wait_before_reconnect(_live_reconnect_delay(failed_attempts))
                 else:
                     print(f"[ARGUS] ⚠️ {e}")
                     traceback.print_exc()
+                    failed_attempts += 1
+                    await self._wait_before_reconnect(_live_reconnect_delay(failed_attempts))
 
 def main():
     import sys
