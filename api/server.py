@@ -168,13 +168,6 @@ app = FastAPI(
     version="0.1.0",
     lifespan=lifespan,
 )
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=list(settings.cors_origins),
-    allow_credentials=True,
-    allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
-    allow_headers=["Authorization", "Content-Type"],
-)
 
 
 @app.exception_handler(RequestValidationError)
@@ -194,17 +187,54 @@ async def invalid_request(_: Request, exc: RequestValidationError) -> JSONRespon
     )
 
 
-@app.exception_handler(Exception)
-async def unexpected_error(request: Request, exc: Exception) -> JSONResponse:
-    # Same {"code", "message"} shape as other errors instead of a plain-text 500.
-    logger.error("Unhandled error on %s %s", request.method, request.url.path, exc_info=exc)
-    return JSONResponse(
-        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-        content={"detail": {
-            "code": "internal_error",
-            "message": "Something went wrong on our side. Please try again.",
-        }},
-    )
+class UnexpectedErrorMiddleware:
+    """Turn unhandled exceptions into the usual JSON error.
+
+    An exception handler for Exception runs in Starlette's outermost
+    middleware, outside CORS, so browsers saw a CORS failure instead of the
+    500 body. This middleware sits inside CORSMiddleware.
+    """
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+        response_started = False
+
+        async def tracking_send(message):
+            nonlocal response_started
+            if message["type"] == "http.response.start":
+                response_started = True
+            await send(message)
+
+        try:
+            await self.app(scope, receive, tracking_send)
+        except Exception as exc:
+            logger.error("Unhandled error on %s %s", scope.get("method"), scope.get("path"), exc_info=exc)
+            if response_started:
+                raise
+            response = JSONResponse(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                content={"detail": {
+                    "code": "internal_error",
+                    "message": "Something went wrong on our side. Please try again.",
+                }},
+            )
+            await response(scope, receive, send)
+
+
+# Added last so CORS wraps everything, including the 500 responses above.
+app.add_middleware(UnexpectedErrorMiddleware)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=list(settings.cors_origins),
+    allow_credentials=True,
+    allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
+    allow_headers=["Authorization", "Content-Type"],
+)
 
 
 def _user_view(user: User, db: Session) -> UserView:
