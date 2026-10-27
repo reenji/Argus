@@ -430,13 +430,20 @@ async def live_socket(websocket: WebSocket) -> None:
                     break
             except LiveFrameError as exc:
                 client._emit({"type": "error", "code": exc.code, "message": exc.message})
+            except HTTPException as exc:
+                if exc.status_code != status.HTTP_429_TOO_MANY_REQUESTS:
+                    raise
+                client._emit({"type": "error", "code": "rate_limited", "message": exc.detail})
     except (WebSocketDisconnect, asyncio.CancelledError):
         pass
-    except Exception as exc:
-        try:
-            await websocket.send_json({"type": "error", "message": str(exc)[:240]})
-        except Exception:
-            pass
+    except Exception:
+        logger.exception("Live session failed for user %s", user.id)
+        # Queued behind pending events; the sender flushes it before closing.
+        client._emit({
+            "type": "error",
+            "code": "internal_error",
+            "message": "The live session stopped unexpectedly. Please reconnect.",
+        })
     finally:
         engine.request_shutdown()
         engine_task.cancel()

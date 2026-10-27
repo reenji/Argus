@@ -336,6 +336,33 @@ class HostedApiTests(unittest.TestCase):
         self.assertEqual(socket.receive_json()["code"], "text_too_long")
         self._assert_session_alive(socket)
 
+    def test_websocket_keeps_the_session_when_text_is_rate_limited(self):
+        from api.rate_limit import limiter
+
+        socket = self._open_live_socket()
+        real_consume = limiter.consume
+
+        async def consume(user_id, bucket, limit, window):
+            if bucket == "live_text":
+                limit = 0
+            await real_consume(user_id, bucket, limit, window)
+
+        with patch.object(limiter, "consume", consume):
+            socket.send_json({"type": "text", "content": "too fast"})
+            self.assertEqual(socket.receive_json()["code"], "rate_limited")
+        self._assert_session_alive(socket)
+
+    def test_websocket_hides_internal_failures(self):
+        socket = self._open_live_socket()
+        with patch.object(
+            FakeLiveEngine, "send_text", side_effect=RuntimeError("db at 10.0.0.9 down"),
+        ):
+            socket.send_json({"type": "text", "content": "boom"})
+            error = socket.receive_json()
+        self.assertEqual(error["code"], "internal_error")
+        self.assertNotIn("10.0.0.9", error["message"])
+        self.assertEqual(socket.receive()["type"], "websocket.close")
+
     def test_authenticated_websocket_streams_engine_events(self):
         raw_key = "AIza" + "B" * 35
         response = self.client.post(
