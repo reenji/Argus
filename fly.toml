@@ -11,6 +11,8 @@ primary_region = "sjc"
   ARGUS_ENV = "production"
   AUTO_CREATE_TABLES = "0"
   REDIS_REQUIRED = "1"
+  # Fly's proxy sets this header itself; clients cannot forge it.
+  CLIENT_IP_HEADER = "Fly-Client-IP"
   PORT = "8000"
 
 [http_service]
