@@ -187,6 +187,10 @@ class HostedApiTests(unittest.TestCase):
         response = self._login_from(_random_address(), "correct-horse-battery-staple")
         self.assertEqual(response.status_code, 429, response.text)
 
+    def test_login_rejects_oversized_passwords(self):
+        response = self._login_from(_random_address(), "x" * 201)
+        self.assertEqual(response.status_code, 422)
+
     def test_signups_are_limited_per_address(self):
         client = TestClient(app, client=(_random_address(), 50000))
         created = []

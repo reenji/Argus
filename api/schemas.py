@@ -11,7 +11,8 @@ class UserCreate(BaseModel):
 
 class LoginRequest(BaseModel):
     email: EmailStr
-    password: str
+    # Bounded like signup so a huge body cannot make scrypt hash megabytes.
+    password: str = Field(min_length=1, max_length=200)
 
 
 class UserView(BaseModel):
