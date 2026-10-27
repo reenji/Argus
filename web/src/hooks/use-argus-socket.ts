@@ -15,6 +15,13 @@ type Capture = {
   sink: GainNode;
 };
 
+// Close codes sent by the /ws endpoint (api/server.py).
+const CLOSE_UNAUTHORIZED = 4401;
+const CLOSE_GEMINI_KEY_REQUIRED = 4403;
+const CLOSE_SESSION_REPLACED = 4409;
+const CLOSE_RATE_LIMITED = 4429;
+const RETRY_DELAY_MS = 2500;
+
 function pcm16(input: Float32Array, sourceRate: number, targetRate = 16000) {
   const ratio = sourceRate / targetRate;
   const length = Math.max(1, Math.floor(input.length / ratio));
@@ -75,9 +82,11 @@ export function useArgusSocket() {
       const token = getToken();
       if (!token || !desired.current) return;
       setState("CONNECTING");
-      const ws = new WebSocket(`${WS_URL}/ws?token=${encodeURIComponent(token)}`);
+      // The token travels as a subprotocol so it never lands in URL logs.
+      const ws = new WebSocket(`${WS_URL}/ws`, ["argus.v1", `bearer.${token}`]);
       ws.binaryType = "arraybuffer";
       socket.current = ws;
+      let retryDelay = RETRY_DELAY_MS;
       ws.onmessage = (message) => {
         const event = JSON.parse(String(message.data));
         if (event.type === "status") setState(event.state as ArgusState);
@@ -95,14 +104,21 @@ export function useArgusSocket() {
         if (event.type === "audio") playAudio(event.data).catch(() => setError("Audio playback needs browser permission."));
         if (event.type === "progress") setProgress({ kind: event.kind, label: event.label, percent: event.percent, phase: event.phase });
         if (event.type === "progress_end" || event.type === "progress_hide") setProgress(null);
-        if (event.type === "error") setError(event.message || "Live session error");
+        if (event.type === "error") {
+          setError(event.message || "Live session error");
+          if (event.code === "rate_limited" && event.retry_after > 0) retryDelay = event.retry_after * 1000;
+        }
       };
       ws.onerror = () => setError("The live channel could not be reached.");
       ws.onclose = (event) => {
         if (socket.current === ws) socket.current = null;
         setState("OFFLINE");
-        if (event.code === 4403) setError("Your Gemini key needs attention.");
-        if (desired.current) retry = setTimeout(connect, 2500);
+        // Refusals that a retry cannot fix end the reconnect loop.
+        if (event.code === CLOSE_UNAUTHORIZED) return setError("Your session expired. Sign in again.");
+        if (event.code === CLOSE_GEMINI_KEY_REQUIRED) return setError("Your Gemini key needs attention.");
+        // Reconnecting would take the session back from the other window, and so on forever.
+        if (event.code === CLOSE_SESSION_REPLACED) return setError("ARGUS is open in another window. Reload to use it here.");
+        if (desired.current) retry = setTimeout(connect, event.code === CLOSE_RATE_LIMITED ? retryDelay : RETRY_DELAY_MS);
       };
     }
 

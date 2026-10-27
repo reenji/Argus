@@ -103,6 +103,7 @@ guarantee for other hardware or configurations.
 
 - [Usage guide](docs/USAGE.md)
 - [Tutorial](docs/TUTORIAL.md)
+- [Hosted API errors](docs/HOSTED_API.md)
 - [Changelog](CHANGELOG.md)
 - [QA and audit guide](docs/QA.md)
 - [Contributing](CONTRIBUTING.md)

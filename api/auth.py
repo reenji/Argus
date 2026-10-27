@@ -22,6 +22,8 @@ def _user_for_token(token: str, db: Session) -> User:
     user = db.get(User, str(payload["sub"]))
     if not user:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Account not found")
+    if int(payload.get("ver", 0)) != user.session_version:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or expired session")
     return user
 
 
@@ -34,8 +36,17 @@ def get_current_user(
     return _user_for_token(credentials.credentials, db)
 
 
+# Browsers cannot set headers on a WebSocket, so the web client offers its
+# token as a subprotocol; unlike a query string it stays out of access logs.
+WEBSOCKET_PROTOCOL = "argus.v1"
+WEBSOCKET_TOKEN_PREFIX = "bearer."
+
+
 def websocket_user(websocket: WebSocket, db: Session) -> User:
-    token = websocket.query_params.get("token", "")
+    token = ""
+    for protocol in websocket.scope.get("subprotocols", []):
+        if protocol.startswith(WEBSOCKET_TOKEN_PREFIX):
+            token = protocol.removeprefix(WEBSOCKET_TOKEN_PREFIX)
     if not token:
         authorization = websocket.headers.get("authorization", "")
         if authorization.lower().startswith("bearer "):

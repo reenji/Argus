@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import os
 
 
@@ -31,16 +31,22 @@ class Settings:
         "http://localhost:3000,http://127.0.0.1:3000",
     )
     chat_model: str = os.environ.get("ARGUS_CHAT_MODEL", "gemini-2.5-flash")
+    chat_timeout_seconds: float = float(os.environ.get("ARGUS_CHAT_TIMEOUT_SECONDS", "60"))
     auto_create_tables: bool = os.environ.get("AUTO_CREATE_TABLES", "1").lower() in {
         "1", "true", "yes", "on",
     }
-    redis_required: bool = os.environ.get("REDIS_REQUIRED", "0").lower() in {
-        "1", "true", "yes", "on",
-    }
+    # Without Redis each process keeps its own counters, which multiplies
+    # every limit by the number of workers, so production refuses to start.
+    redis_required: bool = field(default_factory=lambda: os.environ.get(
+        "REDIS_REQUIRED",
+        "1" if os.environ.get("ARGUS_ENV", "development").lower() == "production" else "0",
+    ).lower() in {"1", "true", "yes", "on"})
 
     def validate_production(self) -> None:
         if self.data_retention_days < 1:
             raise RuntimeError("ARGUS_DATA_RETENTION_DAYS must be at least 1")
+        if self.chat_timeout_seconds <= 0:
+            raise RuntimeError("ARGUS_CHAT_TIMEOUT_SECONDS must be positive")
         if self.environment != "production":
             return
         if self.jwt_secret == "local-development-only-change-me":

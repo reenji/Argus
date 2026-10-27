@@ -630,7 +630,7 @@ class ChatBubbleWidget(QWidget):
     def _on_message(self, text: str):
         # Typing animation for ARGUS messages
         if text.lower().startswith('argus:') and not getattr(self, '_skip_typing', False):
-            body = text[7:].strip()
+            body = text[len('argus:'):].strip()
             self._typing_idx = 0
             self._typing_body = body
             self._typing_full = text
@@ -649,7 +649,7 @@ class ChatBubbleWidget(QWidget):
         # Determine message type
         if tl.startswith("you:"):
             sender = "user"
-            display = text[4:].strip()
+            display = text[len("you:"):].strip()
             align = Qt.AlignmentFlag.AlignRight
             bg_col = C.BORDER
             border_col = C.PRI_DIM
@@ -657,7 +657,7 @@ class ChatBubbleWidget(QWidget):
             name = "YOU"
         elif tl.startswith("argus:"):
             sender = "ai"
-            display = text[7:].strip()
+            display = text[len("argus:"):].strip()
             align = Qt.AlignmentFlag.AlignLeft
             bg_col = C.PRI_GHO
             border_col = C.PRI
@@ -665,7 +665,7 @@ class ChatBubbleWidget(QWidget):
             name = "ARGUS"
         elif tl.startswith("file:"):
             sender = "file"
-            display = text[5:].strip()
+            display = text[len("file:"):].strip()
             align = Qt.AlignmentFlag.AlignLeft
             bg_col = C.GREEN_BG
             border_col = C.GREEN_D

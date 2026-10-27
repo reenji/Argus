@@ -21,6 +21,15 @@ export function setToken(token: string | null) {
   else window.localStorage.removeItem("argus_session");
 }
 
+function errorMessage(detail: unknown, status: number) {
+  if (typeof detail === "string" && detail) return detail;
+  if (detail && typeof detail === "object" && "message" in detail) {
+    const { message } = detail as { message?: unknown };
+    if (typeof message === "string" && message) return message;
+  }
+  return `Request failed (${status})`;
+}
+
 export async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
   const token = getToken();
   const response = await fetch(`${HTTP_URL}${path}`, {
@@ -33,7 +42,7 @@ export async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
   });
   if (!response.ok) {
     const body = await response.json().catch(() => ({}));
-    throw new Error(body.detail || `Request failed (${response.status})`);
+    throw new Error(errorMessage(body.detail, response.status));
   }
   if (response.status === 204) return undefined as T;
   return response.json() as Promise<T>;

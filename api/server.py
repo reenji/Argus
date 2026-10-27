@@ -4,12 +4,16 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import binascii
+import json
+import logging
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from typing import Any
 
-from fastapi import Depends, FastAPI, HTTPException, WebSocket, WebSocketDisconnect, status
+from fastapi import Depends, FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect, status
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
@@ -18,9 +22,10 @@ from core.api_key_validator import normalize_gemini_api_key, validate_gemini_api
 from core.tenant import tenant_scope
 from memory.memory_manager import format_memory_for_prompt, load_memory
 
-from .auth import get_current_user, websocket_user
+from .auth import WEBSOCKET_PROTOCOL, get_current_user, websocket_user
 from .config import settings
 from .database import SessionLocal, get_db, init_db
+from .gemini_errors import gemini_http_error
 from .models import User
 from .rate_limit import limiter
 from .retention import purge_expired_user_data
@@ -40,8 +45,17 @@ from .secret_service import (
     has_user_secret,
     set_user_secret,
 )
-from .security import create_access_token, hash_password, verify_password
+from .security import create_access_token, hash_password, verify_password, verify_unknown_account
 from .websocket_client import WebSocketClient
+
+
+logger = logging.getLogger(__name__)
+
+WS_CLOSE_SERVICE_RESTART = 1012
+WS_CLOSE_UNAUTHORIZED = 4401
+WS_CLOSE_GEMINI_KEY_REQUIRED = 4403
+WS_CLOSE_SESSION_REPLACED = 4409
+WS_CLOSE_RATE_LIMITED = 4429
 
 
 class LiveSessionRegistry:
@@ -54,8 +68,15 @@ class LiveSessionRegistry:
             previous = self._sessions.pop(user_id, None)
             self._sessions[user_id] = (engine, client, task)
         if previous:
-            previous[0].request_shutdown()
-            previous[2].cancel()
+            engine, client, task = previous
+            client._emit({
+                "type": "error",
+                "code": "session_replaced",
+                "message": "ARGUS was opened in another window.",
+            })
+            await client.close(code=WS_CLOSE_SESSION_REPLACED)
+            engine.request_shutdown()
+            task.cancel()
 
     async def remove(self, user_id: str, task: asyncio.Task) -> None:
         async with self._lock:
@@ -82,7 +103,7 @@ class LiveSessionRegistry:
         for engine, client, task in sessions:
             engine.request_shutdown()
             task.cancel()
-            await client.close()
+            await client.close(code=WS_CLOSE_SERVICE_RESTART)
 
 
 live_sessions = LiveSessionRegistry()
@@ -96,8 +117,8 @@ async def _retention_loop() -> None:
                 purge_expired_user_data,
                 settings.data_retention_days,
             )
-        except Exception as exc:
-            print(f"[Retention] Cleanup failed: {exc}")
+        except Exception:
+            logger.exception("Retention cleanup failed")
 
 
 @asynccontextmanager
@@ -110,8 +131,8 @@ async def lifespan(_: FastAPI):
             purge_expired_user_data,
             settings.data_retention_days,
         )
-    except Exception as exc:
-        print(f"[Retention] Initial cleanup failed: {exc}")
+    except Exception:
+        logger.exception("Initial retention cleanup failed")
     await limiter.connect()
     retention_task = asyncio.create_task(_retention_loop())
     try:
@@ -137,6 +158,19 @@ app.add_middleware(
 )
 
 
+@app.exception_handler(Exception)
+async def unexpected_error(request: Request, exc: Exception) -> JSONResponse:
+    # Same {"code", "message"} shape as other errors instead of a plain-text 500.
+    logger.error("Unhandled error on %s %s", request.method, request.url.path, exc_info=exc)
+    return JSONResponse(
+        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        content={"detail": {
+            "code": "internal_error",
+            "message": "Something went wrong on our side. Please try again.",
+        }},
+    )
+
+
 def _user_view(user: User, db: Session) -> UserView:
     return UserView(
         id=user.id,
@@ -151,8 +185,18 @@ def health() -> dict:
     return {"ok": True, "service": "argus-api"}
 
 
+def _client_ip(request: Request) -> str:
+    # uvicorn --proxy-headers already resolves X-Forwarded-For into client.host.
+    return request.client.host if request.client else "unknown"
+
+
 @app.post("/auth/signup", response_model=SessionView, status_code=201)
-async def signup(payload: UserCreate, db: Session = Depends(get_db)) -> SessionView:
+async def signup(
+    payload: UserCreate,
+    request: Request,
+    db: Session = Depends(get_db),
+) -> SessionView:
+    await limiter.consume(_client_ip(request), "signup_ip", 10, 3600)
     await limiter.consume(payload.email.lower(), "signup", 5, 3600)
     user = User(
         email=payload.email.lower().strip(),
@@ -166,16 +210,31 @@ async def signup(payload: UserCreate, db: Session = Depends(get_db)) -> SessionV
         db.rollback()
         raise HTTPException(status_code=409, detail="An account already exists for this email") from exc
     db.refresh(user)
-    return SessionView(access_token=create_access_token(user.id), user=_user_view(user, db))
+    return SessionView(
+        access_token=create_access_token(user.id, user.session_version),
+        user=_user_view(user, db),
+    )
 
 
 @app.post("/auth/login", response_model=SessionView)
-async def login(payload: LoginRequest, db: Session = Depends(get_db)) -> SessionView:
-    await limiter.consume(payload.email.lower(), "login", 10, 300)
+async def login(
+    payload: LoginRequest,
+    request: Request,
+    db: Session = Depends(get_db),
+) -> SessionView:
+    ip = _client_ip(request)
+    await limiter.consume(ip, "login_ip", 50, 300)
+    # Keyed by email and IP so one address cannot lock everyone out of an account.
+    await limiter.consume(f"{payload.email.lower()}|{ip}", "login", 10, 300)
     user = db.scalar(select(User).where(User.email == payload.email.lower().strip()))
+    if user is None:
+        verify_unknown_account(payload.password)
     if not user or not verify_password(payload.password, user.password_hash):
         raise HTTPException(status_code=401, detail="Email or password is incorrect")
-    return SessionView(access_token=create_access_token(user.id), user=_user_view(user, db))
+    return SessionView(
+        access_token=create_access_token(user.id, user.session_version),
+        user=_user_view(user, db),
+    )
 
 
 @app.get("/auth/me", response_model=UserView)
@@ -184,8 +243,10 @@ def me(user: User = Depends(get_current_user), db: Session = Depends(get_db)) ->
 
 
 @app.post("/auth/logout", status_code=204)
-def logout(_: User = Depends(get_current_user)) -> None:
-    return None
+def logout(user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> None:
+    """End every session of this account by invalidating issued tokens."""
+    user.session_version += 1
+    db.commit()
 
 
 @app.post("/me/gemini-key")
@@ -243,7 +304,6 @@ async def chat(
 
     with tenant_scope(user.id):
         history = recent_chat_messages(user.id, limit=12)
-        add_chat_message(user.id, "user", payload.message)
         memory = format_memory_for_prompt(load_memory())
 
         def generate() -> str:
@@ -251,7 +311,12 @@ async def chat(
             from google.genai import types
             from main import _load_system_prompt
 
-            client = genai.Client(api_key=api_key)
+            client = genai.Client(
+                api_key=api_key,
+                http_options=types.HttpOptions(
+                    timeout=int(settings.chat_timeout_seconds * 1000),
+                ),
+            )
             context = "\n".join(
                 f"{message.role.title()}: {message.content}" for message in history
             )
@@ -268,34 +333,106 @@ async def chat(
             )
             return str(response.text or "").strip()
 
-        response_text = await asyncio.to_thread(generate)
+        try:
+            response_text = await asyncio.to_thread(generate)
+        except Exception as exc:
+            logger.warning("Gemini chat failed for user %s: %r", user.id, exc)
+            raise gemini_http_error(exc) from exc
         if not response_text:
             raise HTTPException(status_code=502, detail="Gemini returned an empty response")
+        # Store the turn only once Gemini answers, so failures leave no
+        # orphaned user message in the history sent with the next request.
+        add_chat_message(user.id, "user", payload.message)
         add_chat_message(user.id, "assistant", response_text)
     return ChatResponse(response=response_text)
+
+
+# Browser microphone chunks are ~8 KiB of 16 kHz PCM; anything far larger is abuse.
+MAX_AUDIO_CHUNK_BYTES = 64 * 1024
+MAX_LIVE_TEXT_CHARS = 12000
+
+
+class LiveFrameError(ValueError):
+    """A client frame that is rejected without ending the live session."""
+
+    def __init__(self, code: str, message: str):
+        super().__init__(message)
+        self.code = code
+        self.message = message
+
+
+def _parse_live_event(raw: str) -> dict:
+    try:
+        event = json.loads(raw)
+    except json.JSONDecodeError:
+        event = None
+    if not isinstance(event, dict):
+        raise LiveFrameError("invalid_frame", "Text frames must be JSON objects.")
+    return event
+
+
+def _check_audio_size(size: int) -> None:
+    if size > MAX_AUDIO_CHUNK_BYTES:
+        raise LiveFrameError(
+            "audio_too_large",
+            f"Audio chunks must be at most {MAX_AUDIO_CHUNK_BYTES} bytes.",
+        )
+
+
+def _decode_live_audio(data: Any) -> bytes:
+    if not isinstance(data, str):
+        raise LiveFrameError("invalid_audio", "Audio data must be base64 text.")
+    # Reject before decoding so oversized frames never allocate the payload;
+    # this is the base64 length of a MAX_AUDIO_CHUNK_BYTES chunk.
+    if len(data) > (MAX_AUDIO_CHUNK_BYTES + 2) // 3 * 4:
+        _check_audio_size(MAX_AUDIO_CHUNK_BYTES + 1)
+    try:
+        audio = base64.b64decode(data, validate=True)
+    except (binascii.Error, ValueError) as exc:
+        raise LiveFrameError("invalid_audio", "Audio data must be base64 text.") from exc
+    _check_audio_size(len(audio))
+    return audio
+
+
+async def _refuse_live_socket(websocket: WebSocket, close_code: int, code: str, message: str, **extra) -> None:
+    await websocket.send_json({"type": "error", "code": code, "message": message, **extra})
+    await websocket.close(code=close_code)
 
 
 @app.websocket("/ws")
 async def live_socket(websocket: WebSocket) -> None:
     from main import ArgusLive
 
+    # Accept before refusing: a socket closed during the handshake reaches
+    # the browser as HTTP 403 / close code 1006, hiding the reason.
+    offered = websocket.scope.get("subprotocols", [])
+    await websocket.accept(subprotocol=WEBSOCKET_PROTOCOL if WEBSOCKET_PROTOCOL in offered else None)
     with SessionLocal() as db:
         try:
             user = websocket_user(websocket, db)
-            await limiter.consume(user.id, "websocket", 12, 60)
-            api_key = get_user_secret(db, user.id, "gemini_api_key")
         except HTTPException as exc:
-            await websocket.close(code=4401, reason=str(exc.detail))
+            await _refuse_live_socket(websocket, WS_CLOSE_UNAUTHORIZED, "unauthorized", str(exc.detail))
             return
+        try:
+            await limiter.consume(user.id, "websocket", 12, 60)
+        except HTTPException as exc:
+            await _refuse_live_socket(
+                websocket,
+                WS_CLOSE_RATE_LIMITED,
+                "rate_limited",
+                str(exc.detail),
+                retry_after=int((exc.headers or {}).get("Retry-After", 60)),
+            )
+            return
+        api_key = get_user_secret(db, user.id, "gemini_api_key")
 
-    await websocket.accept()
     if not api_key:
-        await websocket.send_json({
-            "type": "error",
-            "code": "gemini_key_required",
-            "message": "Add a Gemini API key before starting ARGUS.",
-        })
-        await websocket.close(code=4403)
+        await _refuse_live_socket(
+            websocket,
+            WS_CLOSE_GEMINI_KEY_REQUIRED,
+            "gemini_key_required",
+            "Add a Gemini API key before starting ARGUS.",
+        )
         return
 
     client = WebSocketClient(websocket, user.id)
@@ -315,46 +452,70 @@ async def live_socket(websocket: WebSocket) -> None:
         "audio": {"input_rate": 16000, "output_rate": 24000, "encoding": "pcm_s16le"},
     })
 
+    async def handle_frame(message: dict) -> bool:
+        """Apply one client frame; return False when the client asked to close."""
+        if message.get("bytes") is not None:
+            _check_audio_size(len(message["bytes"]))
+            await engine.send_audio_chunk(message["bytes"])
+            return True
+        raw = message.get("text")
+        if raw is None:
+            return True
+        event = _parse_live_event(raw)
+        event_type = event.get("type")
+        if event_type == "text":
+            content = str(event.get("content", ""))
+            if len(content) > MAX_LIVE_TEXT_CHARS:
+                raise LiveFrameError(
+                    "text_too_long",
+                    f"Messages must be at most {MAX_LIVE_TEXT_CHARS} characters.",
+                )
+            await limiter.consume(user.id, "live_text", 60, 60)
+            with tenant_scope(user.id):
+                await engine.send_text(content)
+        elif event_type == "audio":
+            await engine.send_audio_chunk(
+                _decode_live_audio(event.get("data", "")),
+                str(event.get("mime_type") or "audio/pcm;rate=16000"),
+            )
+        elif event_type == "mute":
+            client.muted = bool(event.get("muted", True))
+            client.set_state("MUTED" if client.muted else "LISTENING")
+        elif event_type == "ping":
+            client._emit({
+                "type": "pong",
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            })
+        elif event_type == "close":
+            return False
+        else:
+            raise LiveFrameError("unknown_event", "This event type is not supported.")
+        return True
+
     try:
         while True:
             message = await websocket.receive()
-            if message.get("bytes") is not None:
-                await engine.send_audio_chunk(message["bytes"])
-                continue
-            raw = message.get("text")
-            if raw is None:
-                continue
-            import json
-
-            event = json.loads(raw)
-            event_type = event.get("type")
-            if event_type == "text":
-                await limiter.consume(user.id, "live_text", 60, 60)
-                with tenant_scope(user.id):
-                    await engine.send_text(str(event.get("content", "")))
-            elif event_type == "audio":
-                data = base64.b64decode(event.get("data", ""), validate=True)
-                await engine.send_audio_chunk(
-                    data,
-                    str(event.get("mime_type") or "audio/pcm;rate=16000"),
-                )
-            elif event_type == "mute":
-                client.muted = bool(event.get("muted", True))
-                client.set_state("MUTED" if client.muted else "LISTENING")
-            elif event_type == "ping":
-                client._emit({
-                    "type": "pong",
-                    "timestamp": datetime.now(timezone.utc).isoformat(),
-                })
-            elif event_type == "close":
+            if message["type"] == "websocket.disconnect":
                 break
+            try:
+                if not await handle_frame(message):
+                    break
+            except LiveFrameError as exc:
+                client._emit({"type": "error", "code": exc.code, "message": exc.message})
+            except HTTPException as exc:
+                if exc.status_code != status.HTTP_429_TOO_MANY_REQUESTS:
+                    raise
+                client._emit({"type": "error", "code": "rate_limited", "message": exc.detail})
     except (WebSocketDisconnect, asyncio.CancelledError):
         pass
-    except Exception as exc:
-        try:
-            await websocket.send_json({"type": "error", "message": str(exc)[:240]})
-        except Exception:
-            pass
+    except Exception:
+        logger.exception("Live session failed for user %s", user.id)
+        # Queued behind pending events; the sender flushes it before closing.
+        client._emit({
+            "type": "error",
+            "code": "internal_error",
+            "message": "The live session stopped unexpectedly. Please reconnect.",
+        })
     finally:
         engine.request_shutdown()
         engine_task.cancel()
