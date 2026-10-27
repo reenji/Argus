@@ -105,6 +105,7 @@ de desempenho em outro hardware ou configuração.
 
 - [Guia de uso](docs/USAGE.md)
 - [Tutorial](docs/TUTORIAL.md)
+- [Erros da API hospedada](docs/HOSTED_API.md)
 - [Histórico de versões](CHANGELOG.md)
 - [QA e auditoria](docs/QA.md)
 - [Contribuição](CONTRIBUTING.md)
