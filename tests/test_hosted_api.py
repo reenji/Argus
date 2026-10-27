@@ -308,6 +308,14 @@ class HostedApiTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200, response.text)
         self.assertEqual(set(reads + adds), {"worker"})
 
+    def test_live_socket_authentication_runs_off_the_event_loop(self):
+        import api.server
+
+        read_wrapper, reads = _track_loop(api.server.get_user_secret)
+        with patch.object(api.server, "get_user_secret", read_wrapper):
+            self._open_live_socket()
+        self.assertEqual(reads, ["worker"])
+
     def test_live_transcripts_are_stored_off_the_event_loop(self):
         import api.repositories
 

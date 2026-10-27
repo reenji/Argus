@@ -444,6 +444,13 @@ async def _refuse_live_socket(websocket: WebSocket, close_code: int, code: str, 
     await websocket.close(code=close_code)
 
 
+def _live_session_owner(websocket: WebSocket) -> tuple[User, str | None]:
+    """Authenticate the socket and load the user's key in one short DB session."""
+    with SessionLocal() as db:
+        user = websocket_user(websocket, db)
+        return user, get_user_secret(db, user.id, "gemini_api_key")
+
+
 @app.websocket("/ws")
 async def live_socket(websocket: WebSocket) -> None:
     from main import ArgusLive
@@ -452,24 +459,22 @@ async def live_socket(websocket: WebSocket) -> None:
     # the browser as HTTP 403 / close code 1006, hiding the reason.
     offered = websocket.scope.get("subprotocols", [])
     await websocket.accept(subprotocol=WEBSOCKET_PROTOCOL if WEBSOCKET_PROTOCOL in offered else None)
-    with SessionLocal() as db:
-        try:
-            user = websocket_user(websocket, db)
-        except HTTPException as exc:
-            await _refuse_live_socket(websocket, WS_CLOSE_UNAUTHORIZED, "unauthorized", str(exc.detail))
-            return
-        try:
-            await limiter.consume(user.id, "websocket", 12, 60)
-        except HTTPException as exc:
-            await _refuse_live_socket(
-                websocket,
-                WS_CLOSE_RATE_LIMITED,
-                "rate_limited",
-                str(exc.detail),
-                retry_after=int((exc.headers or {}).get("Retry-After", 60)),
-            )
-            return
-        api_key = get_user_secret(db, user.id, "gemini_api_key")
+    try:
+        user, api_key = await asyncio.to_thread(_live_session_owner, websocket)
+    except HTTPException as exc:
+        await _refuse_live_socket(websocket, WS_CLOSE_UNAUTHORIZED, "unauthorized", str(exc.detail))
+        return
+    try:
+        await limiter.consume(user.id, "websocket", 12, 60)
+    except HTTPException as exc:
+        await _refuse_live_socket(
+            websocket,
+            WS_CLOSE_RATE_LIMITED,
+            "rate_limited",
+            str(exc.detail),
+            retry_after=int((exc.headers or {}).get("Retry-After", 60)),
+        )
+        return
 
     if not api_key:
         await _refuse_live_socket(
