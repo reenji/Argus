@@ -12,9 +12,14 @@ config = context.config
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 
+# api.database.alembic_config passes the URL explicitly when the app migrates
+# itself; the CLI falls back to DATABASE_URL and then alembic.ini.
 config.set_main_option(
     "sqlalchemy.url",
-    _normalize_database_url(os.environ.get("DATABASE_URL", config.get_main_option("sqlalchemy.url"))),
+    _normalize_database_url(
+        config.attributes.get("database_url")
+        or os.environ.get("DATABASE_URL", config.get_main_option("sqlalchemy.url"))
+    ),
 )
 target_metadata = Base.metadata
 
