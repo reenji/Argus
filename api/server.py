@@ -248,7 +248,6 @@ async def chat(
 
     with tenant_scope(user.id):
         history = recent_chat_messages(user.id, limit=12)
-        add_chat_message(user.id, "user", payload.message)
         memory = format_memory_for_prompt(load_memory())
 
         def generate() -> str:
@@ -285,6 +284,9 @@ async def chat(
             raise gemini_http_error(exc) from exc
         if not response_text:
             raise HTTPException(status_code=502, detail="Gemini returned an empty response")
+        # Store the turn only once Gemini answers, so failures leave no
+        # orphaned user message in the history sent with the next request.
+        add_chat_message(user.id, "user", payload.message)
         add_chat_message(user.id, "assistant", response_text)
     return ChatResponse(response=response_text)
 
