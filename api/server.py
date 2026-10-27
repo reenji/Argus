@@ -251,7 +251,12 @@ async def chat(
             from google.genai import types
             from main import _load_system_prompt
 
-            client = genai.Client(api_key=api_key)
+            client = genai.Client(
+                api_key=api_key,
+                http_options=types.HttpOptions(
+                    timeout=int(settings.chat_timeout_seconds * 1000),
+                ),
+            )
             context = "\n".join(
                 f"{message.role.title()}: {message.content}" for message in history
             )
