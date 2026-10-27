@@ -1297,9 +1297,19 @@ class ArgusLive:
         mime_type: str = "audio/pcm;rate=16000",
     ) -> bool:
         """Queue browser-captured PCM for the active Gemini Live session."""
-        if not data or self.out_queue is None or self._shutdown_requested.is_set():
+        if (
+            not data
+            or self.out_queue is None
+            or self.session is None
+            or self._shutdown_requested.is_set()
+        ):
             return False
-        await self.out_queue.put({"data": data, "mime_type": mime_type})
+        try:
+            # Audio is perishable: while Gemini reconnects nobody drains the
+            # queue, and waiting here would freeze the socket reader for good.
+            self.out_queue.put_nowait({"data": data, "mime_type": mime_type})
+        except asyncio.QueueFull:
+            return False
         return True
 
     def set_speaking(self, value: bool):
