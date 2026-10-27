@@ -7,7 +7,6 @@ import sys
 import traceback
 from pathlib import Path
 
-import sounddevice as sd
 from google import genai
 from google.genai import types
 from api import status as argus_status
@@ -21,6 +20,23 @@ import importlib
 import time
 
 from core.live_model import pick_live_model
+
+
+
+class _LazySoundDevice:
+    """Imports sounddevice (and its PortAudio library) on first use.
+
+    Only the desktop microphone and speaker paths need it, so the hosted API
+    and the test suite run on machines without an audio stack.
+    """
+
+    def __getattr__(self, name):
+        import sounddevice
+
+        return getattr(sounddevice, name)
+
+
+sd = _LazySoundDevice()
 
 
 def _lazy_action(module_name: str, attribute: str):

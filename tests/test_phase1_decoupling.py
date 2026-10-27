@@ -1,4 +1,6 @@
 import asyncio
+import subprocess
+import sys
 import unittest
 from types import SimpleNamespace
 
@@ -94,6 +96,17 @@ class PhaseOneDecouplingTests(unittest.TestCase):
 
         self.assertIn("unavailable in cloud-safe mode", response.response["result"])
         self.assertEqual(client.events, [])
+
+
+
+class AudioImportTests(unittest.TestCase):
+    def test_importing_the_engine_does_not_load_sounddevice(self):
+        result = subprocess.run(
+            [sys.executable, "-c", "import sys, main; print('sounddevice' in sys.modules)"],
+            capture_output=True, text=True, timeout=120,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr[-2000:])
+        self.assertEqual(result.stdout.strip().splitlines()[-1], "False")
 
 
 if __name__ == "__main__":
