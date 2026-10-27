@@ -115,6 +115,19 @@ class HostedApiTests(unittest.TestCase):
         response = self._login_from(_random_address(), "correct-horse-battery-staple")
         self.assertEqual(response.status_code, 200, response.text)
 
+    def test_unknown_emails_still_pay_for_a_password_check(self):
+        import api.server
+
+        with patch.object(
+            api.server, "verify_unknown_account", wraps=api.server.verify_unknown_account,
+        ) as check:
+            response = TestClient(app, client=(_random_address(), 50000)).post(
+                "/auth/login",
+                json={"email": f"ghost-{uuid.uuid4().hex}@example.com", "password": "whatever-123"},
+            )
+        self.assertEqual(response.status_code, 401)
+        check.assert_called_once_with("whatever-123")
+
     def test_signups_are_limited_per_address(self):
         client = TestClient(app, client=(_random_address(), 50000))
         created = []

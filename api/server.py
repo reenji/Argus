@@ -44,7 +44,7 @@ from .secret_service import (
     has_user_secret,
     set_user_secret,
 )
-from .security import create_access_token, hash_password, verify_password
+from .security import create_access_token, hash_password, verify_password, verify_unknown_account
 from .websocket_client import WebSocketClient
 
 
@@ -197,6 +197,8 @@ async def login(
     # Keyed by email and IP so one address cannot lock everyone out of an account.
     await limiter.consume(f"{payload.email.lower()}|{ip}", "login", 10, 300)
     user = db.scalar(select(User).where(User.email == payload.email.lower().strip()))
+    if user is None:
+        verify_unknown_account(payload.password)
     if not user or not verify_password(payload.password, user.password_hash):
         raise HTTPException(status_code=401, detail="Email or password is incorrect")
     return SessionView(access_token=create_access_token(user.id), user=_user_view(user, db))

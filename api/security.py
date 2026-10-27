@@ -38,6 +38,16 @@ def verify_password(password: str, encoded: str) -> bool:
         return False
 
 
+# Checked when the email is unknown, so a missing account costs the same
+# scrypt work as a wrong password and response times reveal nothing.
+_UNKNOWN_ACCOUNT_HASH = hash_password(secrets.token_urlsafe(32))
+
+
+def verify_unknown_account(password: str) -> bool:
+    verify_password(password, _UNKNOWN_ACCOUNT_HASH)
+    return False
+
+
 def _b64(data: bytes) -> str:
     return base64.urlsafe_b64encode(data).rstrip(b"=").decode("ascii")
 
