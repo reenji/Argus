@@ -82,7 +82,7 @@ class CloudToolPolicyTests(unittest.TestCase):
             seen.clear()
             response = _run_tool(_cloud_engine(), "deep_research", {"result_action": "save_desktop"})
         self.assertEqual(seen, {})
-        self.assertIn("read it aloud", response.response["result"])
+        self.assertIn("read the report aloud", response.response["result"])
 
 
 class TenantKeyTests(unittest.TestCase):

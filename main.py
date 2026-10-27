@@ -1158,12 +1158,57 @@ LOCAL_MACHINE_ONLY_ACTIONS = frozenset({
 })
 
 
+# Arguments that name server paths, fetch arbitrary URLs or open windows.
+# The hosted app neither offers them to the model nor passes them through,
+# so a prompt cannot make the server read, write or fetch on its behalf.
+CLOUD_BLOCKED_ARGUMENTS: dict[str, frozenset[str]] = {
+    "deep_research": frozenset({"output_path"}),
+    "create_presentation": frozenset({
+        "source_file", "source_files", "source_urls", "template_file",
+        "model_source_file", "output_path", "open_after_create",
+    }),
+}
+CLOUD_RESEARCH_RESULT_ACTIONS = frozenset({"none", "read", "read_aloud", "read_report"})
+
+
+def _cloud_declaration(declaration: dict) -> dict:
+    blocked = CLOUD_BLOCKED_ARGUMENTS.get(declaration.get("name", ""))
+    if not blocked:
+        return declaration
+    parameters = dict(declaration.get("parameters") or {})
+    parameters["properties"] = {
+        key: value
+        for key, value in (parameters.get("properties") or {}).items()
+        if key not in blocked
+    }
+    if "required" in parameters:
+        parameters["required"] = [key for key in parameters["required"] if key not in blocked]
+    return {**declaration, "parameters": parameters}
+
+
+def cloud_tool_arguments(name: str, args: dict) -> tuple[dict, str | None]:
+    """Return arguments safe to run in the hosted app, or a refusal for the model."""
+    blocked = CLOUD_BLOCKED_ARGUMENTS.get(name, frozenset())
+    safe = {key: value for key, value in args.items() if key not in blocked}
+    if name in {"deep_research", "create_presentation"}:
+        # Visible mode drives a browser window on the server, not the user's screen.
+        safe["execution_mode"] = "background"
+    if name == "deep_research":
+        action = str(safe.get("result_action", "none") or "none").strip().lower()
+        if action not in CLOUD_RESEARCH_RESULT_ACTIONS:
+            return safe, (
+                "Saving research files is unavailable in the hosted app. "
+                "I can read the report aloud instead."
+            )
+    return safe, None
+
+
 def get_tool_declarations(*, cloud_safe: bool = False) -> list[dict]:
     """Return the Gemini tools available for the requested runtime."""
     if not cloud_safe:
         return list(TOOL_DECLARATIONS)
     return [
-        declaration
+        _cloud_declaration(declaration)
         for declaration in TOOL_DECLARATIONS
         if declaration.get("name") in CLOUD_SAFE_ACTIONS
     ]
@@ -1523,6 +1568,10 @@ class ArgusLive:
                     )
                 },
             )
+        if getattr(self, "cloud_safe", False):
+            args, refusal = cloud_tool_arguments(name, args)
+            if refusal:
+                return types.FunctionResponse(id=fc.id, name=name, response={"result": refusal})
 
         if getattr(self.ui, "operational_ready", True) is False:
             return types.FunctionResponse(
@@ -1730,7 +1779,8 @@ class ArgusLive:
                     ".wav", ".mp3", ".m4a", ".mp4", ".mov", ".avi", ".webm",
                 }
                 if (
-                    not args.get("source_file")
+                    not getattr(self, "cloud_safe", False)
+                    and not args.get("source_file")
                     and not args.get("source_files")
                     and current_file
                     and Path(str(current_file)).suffix.lower() in supported_sources
