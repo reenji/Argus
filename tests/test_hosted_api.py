@@ -315,6 +315,10 @@ class HostedApiTests(unittest.TestCase):
         with patch.object(api.repositories, "add_chat_message", add_wrapper):
             socket = self._open_live_socket()
             self._assert_session_alive(socket)
+            for _ in range(200):
+                if adds:
+                    break
+                threading.Event().wait(0.01)
         self.assertEqual(adds, ["worker"])
 
     def test_signups_are_limited_per_address(self):
