@@ -334,6 +334,8 @@ async def live_socket(websocket: WebSocket) -> None:
     try:
         while True:
             message = await websocket.receive()
+            if message["type"] == "websocket.disconnect":
+                break
             if message.get("bytes") is not None:
                 await engine.send_audio_chunk(message["bytes"])
                 continue
