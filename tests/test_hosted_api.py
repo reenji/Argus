@@ -206,6 +206,17 @@ class HostedApiTests(unittest.TestCase):
                 socket.send_json({"type": "close"})
                 self.assertEqual(socket.receive()["type"], "websocket.close")
 
+        with SessionLocal() as db:
+            stored = db.scalars(
+                select(ChatMessage)
+                .where(ChatMessage.user_id == self.user_id)
+                .order_by(ChatMessage.created_at)
+            ).all()
+        self.assertEqual(
+            [(row.role, row.content) for row in stored],
+            [("assistant", "Echo: status report")],
+        )
+
 
 class FakeWebSocket:
     def __init__(self):
