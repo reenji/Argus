@@ -52,7 +52,9 @@ from .websocket_client import WebSocketClient
 
 logger = logging.getLogger(__name__)
 
+WS_CLOSE_INTERNAL_ERROR = 1011
 WS_CLOSE_SERVICE_RESTART = 1012
+WS_CLOSE_SESSION_ENDED = 4000
 WS_CLOSE_UNAUTHORIZED = 4401
 WS_CLOSE_GEMINI_KEY_REQUIRED = 4403
 WS_CLOSE_SESSION_REPLACED = 4409
@@ -76,6 +78,17 @@ class LiveSessionRegistry:
                 "message": "ARGUS was opened in another window.",
             })
             await client.close(code=WS_CLOSE_SESSION_REPLACED)
+            engine.request_shutdown()
+            task.cancel()
+
+    async def end(self, user_id: str, close_code: int, code: str, message: str) -> None:
+        """Close the user's live session, if any, telling the client why."""
+        async with self._lock:
+            current = self._sessions.pop(user_id, None)
+        if current:
+            engine, client, task = current
+            client._emit({"type": "error", "code": code, "message": message})
+            await client.close(code=close_code)
             engine.request_shutdown()
             task.cancel()
 
@@ -288,8 +301,14 @@ def me(user: User = Depends(get_current_user), db: Session = Depends(get_db)) ->
 
 
 @app.post("/auth/logout", status_code=204)
-def logout(user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> None:
+async def logout(user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> None:
     """End every session of this account by invalidating issued tokens."""
+    await asyncio.to_thread(_revoke_sessions, db, user)
+    # The live socket authenticated once at connect; close it too.
+    await live_sessions.end(user.id, WS_CLOSE_UNAUTHORIZED, "unauthorized", "You signed out.")
+
+
+def _revoke_sessions(db: Session, user: User) -> None:
     user.session_version += 1
     db.commit()
 
@@ -307,15 +326,29 @@ async def save_gemini_key(
         if not validation.valid:
             raise HTTPException(status_code=422, detail=validation.message)
     await asyncio.to_thread(set_user_secret, db, user.id, "gemini_api_key", key)
+    # Restart a running live session so the engine and its tools use one key.
+    await live_sessions.end(
+        user.id,
+        WS_CLOSE_SERVICE_RESTART,
+        "session_restarted",
+        "Your Gemini API key changed; reconnecting.",
+    )
     return {"configured": True}
 
 
 @app.delete("/me/gemini-key", status_code=204)
-def remove_gemini_key(
+async def remove_gemini_key(
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> None:
-    delete_user_secret(db, user.id, "gemini_api_key")
+    await asyncio.to_thread(delete_user_secret, db, user.id, "gemini_api_key")
+    # The live engine holds the key it connected with; stop using it.
+    await live_sessions.end(
+        user.id,
+        WS_CLOSE_GEMINI_KEY_REQUIRED,
+        "gemini_key_required",
+        "Your Gemini API key was removed.",
+    )
 
 
 @app.get("/status")
@@ -448,6 +481,35 @@ async def _refuse_live_socket(websocket: WebSocket, close_code: int, code: str, 
     await websocket.close(code=close_code)
 
 
+# Close codes and events for an engine that stopped on its own.
+_TERMINAL_CLOSE_CODES = {
+    "gemini_key_rejected": WS_CLOSE_GEMINI_KEY_REQUIRED,
+    "gemini_quota_exceeded": WS_CLOSE_RATE_LIMITED,
+}
+
+
+def _engine_finished(task: asyncio.Task, client: WebSocketClient) -> None:
+    """Close the socket when the engine stops without the server asking it to."""
+    if task.cancelled():
+        return  # The handler, a newer session or shutdown already closed it.
+    error = task.exception()
+    if error is not None:
+        logger.error("Live engine failed for user %s", client.user_id, exc_info=error)
+        client._emit({
+            "type": "error",
+            "code": "live_unavailable",
+            "message": "ARGUS could not keep the live session running. Please try again later.",
+        })
+        close_code = WS_CLOSE_INTERNAL_ERROR
+    elif client.terminal_error is not None:
+        # report_error already sent the event; just pick the matching code.
+        close_code = _TERMINAL_CLOSE_CODES.get(client.terminal_error[0], WS_CLOSE_INTERNAL_ERROR)
+    else:
+        client._emit({"type": "error", "code": "session_ended", "message": "ARGUS ended the session."})
+        close_code = WS_CLOSE_SESSION_ENDED
+    client.closing_task = asyncio.get_running_loop().create_task(client.close(code=close_code))
+
+
 def _live_session_owner(websocket: WebSocket) -> tuple[User, str | None]:
     """Authenticate the socket and load the user's key in one short DB session."""
     with SessionLocal() as db:
@@ -500,6 +562,7 @@ async def live_socket(websocket: WebSocket) -> None:
     with tenant_scope(user.id):
         engine_task = asyncio.create_task(engine.run())
     await live_sessions.replace(user.id, engine, client, engine_task)
+    engine_task.add_done_callback(lambda task: _engine_finished(task, client))
     client._emit({
         "type": "ready",
         "state": "CONNECTING",
