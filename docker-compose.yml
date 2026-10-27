@@ -33,9 +33,10 @@ services:
       REDIS_URL: redis://redis:6379/0
       JWT_SECRET: local-compose-jwt-secret-change-before-deploy
       ARGUS_ENCRYPTION_KEY: local-compose-encryption-secret-change-before-deploy
-      CORS_ORIGINS: http://localhost:3000
+      CORS_ORIGINS: http://localhost:3000,http://127.0.0.1:3000
       AUTO_CREATE_TABLES: "0"
       ARGUS_DATA_RETENTION_DAYS: ${ARGUS_DATA_RETENTION_DAYS:-90}
+      CLIENT_IP_HEADER: ${CLIENT_IP_HEADER:-}
     depends_on:
       postgres: { condition: service_healthy }
       redis: { condition: service_healthy }

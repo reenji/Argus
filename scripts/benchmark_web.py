@@ -62,9 +62,15 @@ def _free_port() -> int:
         return int(sock.getsockname()[1])
 
 
-def _json_request(url: str, method: str = "GET", token: str = "", payload: dict | None = None) -> tuple[int, dict | None]:
+def _json_request(
+    url: str,
+    method: str = "GET",
+    token: str = "",
+    payload: dict | None = None,
+    extra_headers: dict | None = None,
+) -> tuple[int, dict | None]:
     body = json.dumps(payload).encode() if payload is not None else None
-    headers = {"Accept": "application/json"}
+    headers = {"Accept": "application/json", **(extra_headers or {})}
     if body is not None:
         headers["Content-Type"] = "application/json"
     if token:
@@ -94,6 +100,9 @@ def _wait_for_api(base_url: str, process: subprocess.Popen | None, timeout: floa
     raise TimeoutError(f"API did not become healthy at {base_url}/health within {timeout:g}s")
 
 
+BENCHMARK_CLIENT_HEADER = "X-Benchmark-Client"
+
+
 def _create_tokens(base_url: str, count: int) -> list[str]:
     run_id = uuid.uuid4().hex[:12]
     tokens = []
@@ -101,6 +110,9 @@ def _create_tokens(base_url: str, count: int) -> list[str]:
         status, payload = _json_request(
             f"{base_url}/auth/signup",
             method="POST",
+            # Signup is limited to 10 accounts per address per hour; give each
+            # benchmark account its own address through the API's test header.
+            extra_headers={BENCHMARK_CLIENT_HEADER: f"10.77.{index // 250}.{index % 250 + 1}"},
             payload={
                 "email": f"load-{run_id}-{index}@example.com",
                 "display_name": f"Load Session {index}",
@@ -327,7 +339,11 @@ def main() -> int:
     try:
         if args.compose:
             env_file = temp_path / "compose.env"
-            env_file.write_text(f"ARGUS_API_HOST_PORT={host_port}\nARGUS_DATA_RETENTION_DAYS=90\n", encoding="utf-8")
+            env_file.write_text(
+                f"ARGUS_API_HOST_PORT={host_port}\nARGUS_DATA_RETENTION_DAYS=90\n"
+                f"CLIENT_IP_HEADER={BENCHMARK_CLIENT_HEADER}\n",
+                encoding="utf-8",
+            )
             command = [
                 "docker", "compose", "--project-name", compose_project,
                 "--file", str(ROOT / "docker-compose.yml"),
@@ -359,6 +375,7 @@ def main() -> int:
                 "JWT_SECRET": "benchmark-only-secret-not-used-outside-this-run",
                 "ARGUS_ENCRYPTION_KEY": "benchmark-only-encryption-key-not-used-outside-this-run",
                 "AUTO_CREATE_TABLES": "1",
+                "CLIENT_IP_HEADER": BENCHMARK_CLIENT_HEADER,
             })
             server_log = (temp_path / "api.log").open("w", encoding="utf-8")
             server = subprocess.Popen(
