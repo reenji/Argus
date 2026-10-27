@@ -1,7 +1,7 @@
 "use client";
 
 import { type FormEvent, type ReactNode, useEffect, useRef, useState } from "react";
-import { Activity, ArrowUp, LogOut, Mic, MicOff, Radio, ShieldCheck, Wifi, WifiOff } from "lucide-react";
+import { Activity, ArrowUp, KeyRound, LogOut, Mic, MicOff, Radio, ShieldCheck, Wifi, WifiOff } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Reactor } from "@/components/reactor";
 import { useArgusSocket } from "@/hooks/use-argus-socket";
@@ -39,8 +39,8 @@ function MessageContent({ content }: { content: string }) {
   return <div className="message-content">{nodes}</div>;
 }
 
-export function ArgusConsole({ user, onSignOut }: { user: User; onSignOut: () => void }) {
-  const live = useArgusSocket();
+export function ArgusConsole({ user, onSignOut, onReplaceKey }: { user: User; onSignOut: () => void; onReplaceKey: () => void }) {
+  const live = useArgusSocket({ onKeyRequired: onReplaceKey });
   const [actions, setActions] = useState<Action[]>([]);
   const [draft, setDraft] = useState("");
   const logEnd = useRef<HTMLDivElement>(null);
@@ -63,7 +63,7 @@ export function ArgusConsole({ user, onSignOut }: { user: User; onSignOut: () =>
           {connected ? <Wifi size={14} /> : <WifiOff size={14} />}
           <span>{live.state}</span>
         </div>
-        <div className="operator-menu"><span>{user.display_name}</span><Button variant="ghost" size="sm" onClick={onSignOut}><LogOut size={14} /> Sign out</Button></div>
+        <div className="operator-menu"><span>{user.display_name}</span><Button variant="ghost" size="sm" onClick={onReplaceKey}><KeyRound size={14} /> Gemini key</Button><Button variant="ghost" size="sm" onClick={onSignOut}><LogOut size={14} /> Sign out</Button></div>
       </header>
 
       <div className="console-grid">
@@ -91,7 +91,7 @@ export function ArgusConsole({ user, onSignOut }: { user: User; onSignOut: () =>
           </div>
           <form className="command-composer" onSubmit={submit}>
             <textarea value={draft} onChange={(event) => setDraft(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); event.currentTarget.form?.requestSubmit(); } }} placeholder="Issue an instruction" aria-label="Message ARGUS" rows={2} />
-            <Button type="button" variant={live.micActive ? "danger" : "secondary"} size="icon" disabled={!connected} aria-label={live.micActive ? "Mute microphone" : "Enable microphone"} onClick={() => live.micActive ? live.stopMic() : live.startMic()}>
+            <Button type="button" variant={live.micActive ? "danger" : "secondary"} size="icon" disabled={!connected && !live.micActive} aria-label={live.micActive ? "Mute microphone" : "Enable microphone"} onClick={() => live.micActive ? live.stopMic() : live.startMic()}>
               {live.micActive ? <MicOff size={18} /> : <Mic size={18} />}
             </Button>
             <Button type="submit" size="icon" aria-label="Send instruction" disabled={!draft.trim() || !connected}><ArrowUp size={18} /></Button>

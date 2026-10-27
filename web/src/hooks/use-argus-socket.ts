@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { getToken, WS_URL } from "@/lib/api";
+import { getToken, sessionExpired, WS_URL } from "@/lib/api";
 
 export type ArgusState = "OFFLINE" | "CONNECTING" | "LISTENING" | "THINKING" | "SPEAKING" | "MUTED";
 export type Message = { id: string; role: "user" | "assistant" | "system"; content: string; at: string };
@@ -15,12 +15,24 @@ type Capture = {
   sink: GainNode;
 };
 
-// Close codes sent by the /ws endpoint (api/server.py).
+// Close codes sent by the /ws endpoint (api/server.py, docs/HOSTED_API.md).
+const CLOSE_SESSION_ENDED = 4000;
 const CLOSE_UNAUTHORIZED = 4401;
 const CLOSE_GEMINI_KEY_REQUIRED = 4403;
 const CLOSE_SESSION_REPLACED = 4409;
 const CLOSE_RATE_LIMITED = 4429;
-const RETRY_DELAY_MS = 2500;
+const ARGUS_STATES = new Set(["OFFLINE", "CONNECTING", "LISTENING", "THINKING", "SPEAKING", "MUTED"]);
+
+/** Exponential backoff with jitter: ~1 s, 2 s, 4 s ... capped at 30 s. */
+function reconnectDelay(attempt: number) {
+  const base = Math.min(30_000, 1000 * 2 ** Math.max(0, attempt - 1));
+  return base / 2 + Math.random() * (base / 2);
+}
+
+type SocketCallbacks = {
+  /** The server says the account has no usable Gemini key. */
+  onKeyRequired?: () => void;
+};
 
 function pcm16(input: Float32Array, sourceRate: number, targetRate = 16000) {
   const ratio = sourceRate / targetRate;
@@ -37,12 +49,13 @@ function pcm16(input: Float32Array, sourceRate: number, targetRate = 16000) {
   return output;
 }
 
-export function useArgusSocket() {
+export function useArgusSocket({ onKeyRequired }: SocketCallbacks = {}) {
   const socket = useRef<WebSocket | null>(null);
   const capture = useRef<Capture | null>(null);
+  const startingMic = useRef(false);
   const playback = useRef<AudioContext | null>(null);
   const nextPlaybackAt = useRef(0);
-  const desired = useRef(true);
+  const stopMicRef = useRef<(() => Promise<void>) | null>(null);
   const [state, setState] = useState<ArgusState>("CONNECTING");
   const [messages, setMessages] = useState<Message[]>([]);
   const [transcript, setTranscript] = useState("");
@@ -74,66 +87,112 @@ export function useArgusSocket() {
     nextPlaybackAt.current = start + buffer.duration;
   }, [ensurePlayback]);
 
+  const keyRequired = useRef(onKeyRequired);
+  useEffect(() => { keyRequired.current = onKeyRequired; }, [onKeyRequired]);
+
   useEffect(() => {
-    desired.current = true;
+    // Each run of this effect owns its sockets and timers; events from a
+    // socket of an earlier run (React strict mode, remounts) are ignored.
+    let active = true;
     let retry: ReturnType<typeof setTimeout> | undefined;
+    let attempt = 0;
+
+    function stop(message: string) {
+      setError(message);
+      void stopMicRef.current?.();
+    }
 
     function connect() {
       const token = getToken();
-      if (!token || !desired.current) return;
+      if (!token || !active) return;
       setState("CONNECTING");
       // The token travels as a subprotocol so it never lands in URL logs.
       const ws = new WebSocket(`${WS_URL}/ws`, ["argus.v1", `bearer.${token}`]);
       ws.binaryType = "arraybuffer";
       socket.current = ws;
-      let retryDelay = RETRY_DELAY_MS;
+      let retryAfterMs = 0;
+      const current = () => active && socket.current === ws;
+
       ws.onmessage = (message) => {
-        const event = JSON.parse(String(message.data));
-        if (event.type === "status") setState(event.state as ArgusState);
-        if (event.type === "ready") setError("");
-        if (event.type === "message") {
-          setMessages((current) => {
-            const role = event.role as Message["role"];
-            const previous = current[current.length - 1];
-            if (previous?.role === role && previous.content === event.content) return current;
-            return [...current.slice(-99), { id: crypto.randomUUID(), role, content: event.content, at: event.timestamp }];
+        if (!current()) return;
+        let event;
+        try {
+          event = JSON.parse(String(message.data));
+        } catch {
+          return;
+        }
+        if (!event || typeof event !== "object") return;
+        if (event.type === "status" && ARGUS_STATES.has(event.state)) setState(event.state as ArgusState);
+        if (event.type === "ready") {
+          attempt = 0;
+          setError("");
+        }
+        if (event.type === "message" && typeof event.content === "string") {
+          setMessages((list) => {
+            const role = (["user", "assistant", "system"].includes(event.role) ? event.role : "system") as Message["role"];
+            const previous = list[list.length - 1];
+            if (previous?.role === role && previous.content === event.content) return list;
+            return [...list.slice(-99), { id: crypto.randomUUID(), role, content: event.content, at: event.timestamp }];
           });
         }
-        if (event.type === "transcript") setTranscript((value) => `${value} ${event.content}`.trim());
+        if (event.type === "transcript" && typeof event.content === "string") setTranscript((value) => `${value} ${event.content}`.trim());
         if (event.type === "transcript_clear") setTranscript("");
-        if (event.type === "audio") playAudio(event.data).catch(() => setError("Audio playback needs browser permission."));
-        if (event.type === "progress") setProgress({ kind: event.kind, label: event.label, percent: event.percent, phase: event.phase });
-        if (event.type === "progress_end" || event.type === "progress_hide") setProgress(null);
+        if (event.type === "audio" && typeof event.data === "string") playAudio(event.data).catch(() => setError("Audio playback needs browser permission."));
+        if (event.type === "progress" && event.visible !== false) {
+          setProgress({ kind: String(event.kind), label: String(event.label), percent: Number(event.percent) || 0, phase: String(event.phase ?? "") });
+        }
+        if (event.type === "progress_end") {
+          setProgress(null);
+          if (event.state === "failed" && event.detail) setError(String(event.detail));
+        }
+        if (event.type === "progress_hide") setProgress(null);
         if (event.type === "error") {
-          setError(event.message || "Live session error");
-          if (event.code === "rate_limited" && event.retry_after > 0) retryDelay = event.retry_after * 1000;
+          setError(typeof event.message === "string" && event.message ? event.message : "Live session error");
+          if (event.retry_after > 0) retryAfterMs = event.retry_after * 1000;
         }
       };
-      ws.onerror = () => setError("The live channel could not be reached.");
+      ws.onerror = () => { if (current()) setError("The live channel could not be reached."); };
       ws.onclose = (event) => {
-        if (socket.current === ws) socket.current = null;
+        if (!current()) return;
+        socket.current = null;
         setState("OFFLINE");
         // Refusals that a retry cannot fix end the reconnect loop.
-        if (event.code === CLOSE_UNAUTHORIZED) return setError("Your session expired. Sign in again.");
-        if (event.code === CLOSE_GEMINI_KEY_REQUIRED) return setError("Your Gemini key needs attention.");
+        if (event.code === CLOSE_UNAUTHORIZED) {
+          stop("Your session expired. Sign in again.");
+          sessionExpired();
+          return;
+        }
+        if (event.code === CLOSE_GEMINI_KEY_REQUIRED) {
+          stop("Your Gemini key needs attention.");
+          keyRequired.current?.();
+          return;
+        }
         // Reconnecting would take the session back from the other window, and so on forever.
-        if (event.code === CLOSE_SESSION_REPLACED) return setError("ARGUS is open in another window. Reload to use it here.");
-        if (desired.current) retry = setTimeout(connect, event.code === CLOSE_RATE_LIMITED ? retryDelay : RETRY_DELAY_MS);
+        if (event.code === CLOSE_SESSION_REPLACED) return stop("ARGUS is open in another window. Reload to use it here.");
+        if (event.code === CLOSE_SESSION_ENDED) return stop("ARGUS ended the session. Reload to start again.");
+        attempt += 1;
+        const delay = event.code === CLOSE_RATE_LIMITED
+          ? Math.max(retryAfterMs || 60_000, reconnectDelay(attempt))
+          : reconnectDelay(attempt);
+        retry = setTimeout(connect, delay);
       };
     }
 
     connect();
     return () => {
-      desired.current = false;
+      active = false;
       if (retry) clearTimeout(retry);
       socket.current?.close();
+      socket.current = null;
     };
   }, [playAudio]);
 
   const sendText = useCallback(async (content: string) => {
     const clean = content.trim();
     if (!clean || socket.current?.readyState !== WebSocket.OPEN) return false;
-    await ensurePlayback();
+    // Unlock audio for the reply, but a blocked AudioContext must not lose the message.
+    await ensurePlayback().catch(() => undefined);
+    if (socket.current?.readyState !== WebSocket.OPEN) return false;
     setMessages((current) => [...current.slice(-99), { id: crypto.randomUUID(), role: "user", content: clean, at: new Date().toISOString() }]);
     socket.current.send(JSON.stringify({ type: "text", content: clean }));
     return true;
@@ -141,31 +200,37 @@ export function useArgusSocket() {
 
   const stopMic = useCallback(async () => {
     const current = capture.current;
+    capture.current = null;
+    setMicActive(false);
+    if (socket.current?.readyState === WebSocket.OPEN) socket.current.send(JSON.stringify({ type: "mute", muted: true }));
     if (current) {
       current.processor.disconnect();
       current.source.disconnect();
       current.sink.disconnect();
       current.stream.getTracks().forEach((track) => track.stop());
-      await current.context.close();
-      capture.current = null;
+      await current.context.close().catch(() => undefined);
     }
-    setMicActive(false);
-    if (socket.current?.readyState === WebSocket.OPEN) socket.current.send(JSON.stringify({ type: "mute", muted: true }));
   }, []);
+  useEffect(() => { stopMicRef.current = stopMic; }, [stopMic]);
 
   const startMic = useCallback(async () => {
-    if (capture.current) return;
+    // A second click while the permission prompt is open must not open a second capture.
+    if (capture.current || startingMic.current) return;
+    startingMic.current = true;
+    let stream: MediaStream | null = null;
+    let context: AudioContext | null = null;
     try {
       await ensurePlayback();
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true, autoGainControl: true } });
-      const context = new AudioContext();
+      stream = await navigator.mediaDevices.getUserMedia({ audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true, autoGainControl: true } });
+      context = new AudioContext();
+      const sampleRate = context.sampleRate;
       const source = context.createMediaStreamSource(stream);
       const processor = context.createScriptProcessor(4096, 1, 1);
       const sink = context.createGain();
       sink.gain.value = 0;
       processor.onaudioprocess = (event) => {
         if (socket.current?.readyState !== WebSocket.OPEN) return;
-        const encoded = pcm16(event.inputBuffer.getChannelData(0), context.sampleRate);
+        const encoded = pcm16(event.inputBuffer.getChannelData(0), sampleRate);
         socket.current.send(encoded.buffer);
       };
       source.connect(processor);
@@ -173,9 +238,14 @@ export function useArgusSocket() {
       sink.connect(context.destination);
       capture.current = { context, stream, source, processor, sink };
       setMicActive(true);
-      socket.current?.send(JSON.stringify({ type: "mute", muted: false }));
+      if (socket.current?.readyState === WebSocket.OPEN) socket.current.send(JSON.stringify({ type: "mute", muted: false }));
     } catch (reason) {
+      // Release whatever was opened so the browser's recording indicator turns off.
+      stream?.getTracks().forEach((track) => track.stop());
+      await context?.close().catch(() => undefined);
       setError(reason instanceof Error ? reason.message : "Microphone access was denied.");
+    } finally {
+      startingMic.current = false;
     }
   }, [ensurePlayback]);
 
