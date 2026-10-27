@@ -42,9 +42,11 @@ jobs:
         with: { python-version: "3.12", cache: pip }
       - run: pip install -r requirements.txt
       - run: alembic upgrade head
-      # Desktop action modules load PortAudio (sounddevice) and need an X
-      # display (pyautogui) just to import.
-      - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends xvfb libportaudio2
+      # Desktop modules load PortAudio (sounddevice), need an X display
+      # (pyautogui) and Qt's EGL/xkb runtime (PyQt6) just to import.
+      - run: >-
+          sudo apt-get update && sudo apt-get install -y --no-install-recommends
+          xvfb libportaudio2 libegl1 libgl1 libxkbcommon-x11-0 libdbus-1-3 libfontconfig1
       - run: >-
           xvfb-run -a python -m unittest -v
           tests.test_phase1_decoupling tests.test_hosted_api tests.test_core_resilience
