@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import importlib
 import binascii
 import json
 import logging
@@ -124,6 +125,9 @@ async def _retention_loop() -> None:
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     settings.validate_production()
+    # Importing the engine takes ~0.5 s; doing it here keeps the first /ws
+    # from freezing every other connection while it loads.
+    await asyncio.to_thread(importlib.import_module, "main")
     if settings.auto_create_tables:
         await asyncio.to_thread(init_db)
     try:
