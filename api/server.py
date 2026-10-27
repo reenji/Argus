@@ -158,6 +158,10 @@ def health() -> dict:
     return {"ok": True, "service": "argus-api"}
 
 
+LOGIN_FAILURES_PER_ACCOUNT = 30
+LOGIN_FAILURE_WINDOW = 15 * 60
+
+
 def _client_ip(request: Request) -> str:
     if settings.client_ip_header:
         value = request.headers.get(settings.client_ip_header, "").strip()
@@ -209,13 +213,23 @@ async def login(
     db: Session = Depends(get_db),
 ) -> SessionView:
     ip = _client_ip(request)
+    account = payload.email.lower().strip()
     await limiter.consume(ip, "login_ip", 50, 300)
     # Keyed by email and IP so one address cannot lock everyone out of an account.
-    await limiter.consume(f"{payload.email.lower()}|{ip}", "login", 10, 300)
-    user = db.scalar(select(User).where(User.email == payload.email.lower().strip()))
+    await limiter.consume(f"{account}|{ip}", "login", 10, 300)
+    # Caps guessing spread over many addresses; only failures count.
+    failures = await limiter.count(account, "login_failures", LOGIN_FAILURE_WINDOW)
+    if failures >= LOGIN_FAILURES_PER_ACCOUNT:
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="Too many failed sign-in attempts. Please try again later.",
+            headers={"Retry-After": str(LOGIN_FAILURE_WINDOW)},
+        )
+    user = db.scalar(select(User).where(User.email == account))
     if user is None:
         verify_unknown_account(payload.password)
     if not user or not verify_password(payload.password, user.password_hash):
+        await limiter.record(account, "login_failures", LOGIN_FAILURE_WINDOW)
         raise HTTPException(status_code=401, detail="Email or password is incorrect")
     return SessionView(
         access_token=create_access_token(user.id, user.session_version),
