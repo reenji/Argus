@@ -215,6 +215,12 @@ async def signup(
 ) -> SessionView:
     await limiter.consume(_client_ip(request), "signup_ip", 10, 3600)
     await limiter.consume(payload.email.lower(), "signup", 5, 3600)
+    return await asyncio.to_thread(_create_account, db, payload)
+
+
+# scrypt costs ~25 ms of CPU and the ORM is synchronous; both run in worker
+# threads so one sign-in cannot stall every live session on the event loop.
+def _create_account(db: Session, payload: UserCreate) -> SessionView:
     user = User(
         email=payload.email.lower().strip(),
         display_name=payload.display_name.strip(),
@@ -227,6 +233,19 @@ async def signup(
         db.rollback()
         raise HTTPException(status_code=409, detail="An account already exists for this email") from exc
     db.refresh(user)
+    return SessionView(
+        access_token=create_access_token(user.id, user.session_version),
+        user=_user_view(user, db),
+    )
+
+
+def _authenticate(db: Session, account: str, password: str) -> SessionView | None:
+    user = db.scalar(select(User).where(User.email == account))
+    if user is None:
+        verify_unknown_account(password)
+        return None
+    if not verify_password(password, user.password_hash):
+        return None
     return SessionView(
         access_token=create_access_token(user.id, user.session_version),
         user=_user_view(user, db),
@@ -252,16 +271,11 @@ async def login(
             detail="Too many failed sign-in attempts. Please try again later.",
             headers={"Retry-After": str(LOGIN_FAILURE_WINDOW)},
         )
-    user = db.scalar(select(User).where(User.email == account))
-    if user is None:
-        verify_unknown_account(payload.password)
-    if not user or not verify_password(payload.password, user.password_hash):
+    session = await asyncio.to_thread(_authenticate, db, account, payload.password)
+    if session is None:
         await limiter.record(account, "login_failures", LOGIN_FAILURE_WINDOW)
         raise HTTPException(status_code=401, detail="Email or password is incorrect")
-    return SessionView(
-        access_token=create_access_token(user.id, user.session_version),
-        user=_user_view(user, db),
-    )
+    return session
 
 
 @app.get("/auth/me", response_model=UserView)
