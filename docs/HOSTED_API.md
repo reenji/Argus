@@ -15,7 +15,9 @@ message string; `/chat` failures from Gemini use `{"code", "message"}`:
 | 504 | `gemini_timeout` | Gemini did not answer within `ARGUS_CHAT_TIMEOUT_SECONDS`. |
 | 502 | `gemini_failed` | Any other Gemini failure; details are only in the server log. |
 
-Rate-limited requests answer 429 with a `Retry-After` header.
+Rate-limited requests answer 429 with a `Retry-After` header. Unexpected
+server errors answer 500 with `{"code": "internal_error", "message": ...}`;
+the stack trace is only in the server log.
 
 ## Live WebSocket (`/ws`)
 
@@ -34,12 +36,15 @@ Problems with a single frame produce an event and the session continues:
 | `unknown_event` | An unsupported `type`. |
 | `rate_limited` | Too many text messages; wait and resend. |
 
-When the server refuses or ends a session it sends an `error` event first and
-then closes the socket with one of these codes:
+When the server refuses or ends a session it sends an `error` event first
+(except on restart) and then closes the socket with one of these codes. Each
+account has one live session at a time:
 
 | Close code | `code` | Client should |
 |---|---|---|
 | 4401 | `unauthorized` | Sign in again; do not reconnect with the same token. |
 | 4403 | `gemini_key_required` | Ask the user to add a Gemini API key. |
+| 4409 | `session_replaced` | Stop; the same account opened ARGUS in another window. |
 | 4429 | `rate_limited` | Reconnect after `retry_after` seconds. |
+| 1012 | — | The server is restarting; reconnect shortly. |
 | 1000 | `internal_error` | Reconnect; the failure is in the server log. |
