@@ -12,7 +12,8 @@ from .models import PresentationRequest, SourceBundle
 
 
 IMAGE_QUOTA_COOLDOWN_SECONDS = 5 * 60
-_image_quota_cooldown_until = 0.0
+# Per user ("" on the desktop), like the planning cooldown in presentation_maker.
+_image_quota_cooldown_until: dict[str, float] = {}
 
 
 def _is_quota_error(error: Exception) -> bool:
@@ -20,13 +21,22 @@ def _is_quota_error(error: Exception) -> bool:
     return any(token in message for token in ("429", "quota", "resource_exhausted", "rate limit"))
 
 
+def _cooldown_owner() -> str:
+    from core.tenant import get_current_user_id
+
+    return get_current_user_id() or ""
+
+
 def _image_quota_cooldown_active() -> bool:
-    return time.monotonic() < _image_quota_cooldown_until
+    return time.monotonic() < _image_quota_cooldown_until.get(_cooldown_owner(), 0.0)
 
 
 def _mark_image_quota_cooldown() -> None:
-    global _image_quota_cooldown_until
-    _image_quota_cooldown_until = time.monotonic() + IMAGE_QUOTA_COOLDOWN_SECONDS
+    now = time.monotonic()
+    for owner, until in list(_image_quota_cooldown_until.items()):
+        if until <= now:
+            del _image_quota_cooldown_until[owner]
+    _image_quota_cooldown_until[_cooldown_owner()] = now + IMAGE_QUOTA_COOLDOWN_SECONDS
 
 
 def _image_request_limit(request: PresentationRequest, slide_total: int) -> int:

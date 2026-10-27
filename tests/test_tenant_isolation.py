@@ -101,6 +101,15 @@ class PresentationCooldownTests(unittest.TestCase):
         with tenant_scope("bob"):
             self.assertFalse(presentation_maker._presentation_quota_cooldown_active())
 
+    def test_an_image_quota_cooldown_only_affects_its_own_user(self):
+        from actions.presentations import assets
+
+        with tenant_scope("alice"):
+            assets._mark_image_quota_cooldown()
+            self.assertTrue(assets._image_quota_cooldown_active())
+        with tenant_scope("bob"):
+            self.assertFalse(assets._image_quota_cooldown_active())
+
 
 if __name__ == "__main__":
     unittest.main()

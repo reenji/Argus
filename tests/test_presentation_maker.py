@@ -97,8 +97,8 @@ class PresentationMakerTests(unittest.TestCase):
     def setUp(self):
         maker._pending_presentation_parameters = None
         maker._pending_presentation_created_at = 0.0
-        maker._presentation_quota_cooldown_until = 0.0
-        presentation_assets._image_quota_cooldown_until = 0.0
+        maker._presentation_quota_cooldown_until.clear()
+        presentation_assets._image_quota_cooldown_until.clear()
         maker._presentation_output_locks.clear()
 
     def test_default_theme_is_restrained_argus_minimal(self):
