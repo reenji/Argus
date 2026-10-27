@@ -4,20 +4,30 @@ How the FastAPI service (`api/server.py`) reports failures to clients.
 
 ## HTTP
 
-Errors use FastAPI's `{"detail": ...}` body. Most `detail` values are a
-message string; `/chat` failures from Gemini use `{"code", "message"}`:
+Every error answers with the same body:
+
+```json
+{"detail": {"code": "gemini_key_required", "message": "Add a Gemini API key before starting ARGUS"}}
+```
+
+Validation errors also list the offending body fields in `detail.fields`.
 
 | Status | `code` | Meaning |
 |---|---|---|
+| 401 | `unauthorized` | Missing, invalid, expired or revoked (after logout) token. |
+| 401 | `invalid_credentials` | Wrong email or password. |
+| 409 | `account_exists` | Signup with an email that already has an account. |
+| 409 | `gemini_key_required` | `/chat` without a saved Gemini key. |
 | 409 | `gemini_key_rejected` | Gemini rejected the saved API key. |
-| 429 | `gemini_quota_exceeded` | The key's Gemini quota is used up (`Retry-After` is set). |
+| 422 | `invalid_request` | The body failed validation; see `fields`. |
+| 422 | `gemini_key_invalid` | The submitted key is malformed or Gemini rejected it. |
+| 429 | `rate_limited` | Our own request limits; `Retry-After` is set. |
+| 429 | `gemini_quota_exceeded` | The key's Gemini quota is used up; `Retry-After` is set. |
+| 502 | `gemini_empty_response` | Gemini answered with no text. |
+| 502 | `gemini_failed` | Any other Gemini failure; details are only in the server log. |
 | 503 | `gemini_unavailable` | Gemini returned a server error or could not be reached. |
 | 504 | `gemini_timeout` | Gemini did not answer within `ARGUS_CHAT_TIMEOUT_SECONDS`. |
-| 502 | `gemini_failed` | Any other Gemini failure; details are only in the server log. |
-
-Rate-limited requests answer 429 with a `Retry-After` header. Unexpected
-server errors answer 500 with `{"detail": {"code": "internal_error", "message": ...}}`;
-the stack trace is only in the server log.
+| 500 | `internal_error` | Unexpected server error; the stack trace is only in the server log. |
 
 ## Live WebSocket (`/ws`)
 
