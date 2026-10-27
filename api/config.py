@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import os
 
 
@@ -35,9 +35,12 @@ class Settings:
     auto_create_tables: bool = os.environ.get("AUTO_CREATE_TABLES", "1").lower() in {
         "1", "true", "yes", "on",
     }
-    redis_required: bool = os.environ.get("REDIS_REQUIRED", "0").lower() in {
-        "1", "true", "yes", "on",
-    }
+    # Without Redis each process keeps its own counters, which multiplies
+    # every limit by the number of workers, so production refuses to start.
+    redis_required: bool = field(default_factory=lambda: os.environ.get(
+        "REDIS_REQUIRED",
+        "1" if os.environ.get("ARGUS_ENV", "development").lower() == "production" else "0",
+    ).lower() in {"1", "true", "yes", "on"})
 
     def validate_production(self) -> None:
         if self.data_retention_days < 1:

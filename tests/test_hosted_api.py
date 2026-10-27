@@ -141,6 +141,19 @@ class HostedApiTests(unittest.TestCase):
         fresh = {"Authorization": f"Bearer {response.json()['access_token']}"}
         self.assertEqual(self.client.get("/auth/me", headers=fresh).status_code, 200)
 
+    def test_production_requires_redis_unless_opted_out(self):
+        import os
+        from api.config import Settings
+
+        with patch.dict(os.environ, {"ARGUS_ENV": "production"}):
+            os.environ.pop("REDIS_REQUIRED", None)
+            self.assertTrue(Settings().redis_required)
+            os.environ["REDIS_REQUIRED"] = "0"
+            self.assertFalse(Settings().redis_required)
+        with patch.dict(os.environ, {"ARGUS_ENV": "development"}):
+            os.environ.pop("REDIS_REQUIRED", None)
+            self.assertFalse(Settings().redis_required)
+
     def test_signups_are_limited_per_address(self):
         client = TestClient(app, client=(_random_address(), 50000))
         created = []
