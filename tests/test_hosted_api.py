@@ -1,4 +1,6 @@
 import asyncio
+import ipaddress
+import random
 import base64
 import threading
 import unittest
@@ -24,6 +26,11 @@ from api.server import app
 from api.websocket_client import WebSocketClient
 from core.tenant import tenant_scope
 from memory.memory_manager import load_memory, update_memory
+
+
+def _random_address():
+    """A fresh client IP, so rate-limit buckets never carry over between runs."""
+    return str(ipaddress.IPv4Address(random.getrandbits(32)))
 
 
 class FakeLiveEngine:
@@ -67,7 +74,8 @@ class HostedApiTests(unittest.TestCase):
 
     def setUp(self):
         self.email = f"operator-{uuid.uuid4().hex}@example.com"
-        response = self.client.post("/auth/signup", json={
+        # Each test signs up from its own address so per-IP signup limits never trip.
+        response = TestClient(app, client=(_random_address(), 50000)).post("/auth/signup", json={
             "email": self.email,
             "password": "correct-horse-battery-staple",
             "display_name": "Morgan",
@@ -94,6 +102,36 @@ class HostedApiTests(unittest.TestCase):
         self.assertFalse(verify_password("incorrect-password", encoded))
         token = create_access_token(self.user_id)
         self.assertEqual(decode_access_token(token)["sub"], self.user_id)
+
+    def _login_from(self, address, password="wrong-password-123"):
+        client = TestClient(app, client=(address, 50000))
+        return client.post("/auth/login", json={"email": self.email, "password": password})
+
+    def test_failed_logins_from_one_address_do_not_lock_out_others(self):
+        attacker = _random_address()
+        for _ in range(10):
+            self.assertEqual(self._login_from(attacker).status_code, 401)
+        self.assertEqual(self._login_from(attacker).status_code, 429)
+        response = self._login_from(_random_address(), "correct-horse-battery-staple")
+        self.assertEqual(response.status_code, 200, response.text)
+
+    def test_signups_are_limited_per_address(self):
+        client = TestClient(app, client=(_random_address(), 50000))
+        created = []
+        try:
+            for index in range(11):
+                response = client.post("/auth/signup", json={
+                    "email": f"bulk-{index}-{uuid.uuid4().hex}@example.com",
+                    "password": "correct-horse-battery-staple",
+                    "display_name": "Bulk",
+                })
+                if response.status_code == 201:
+                    created.append(response.json()["user"]["id"])
+            self.assertEqual(len(created), 10)
+            self.assertEqual(response.status_code, 429)
+        finally:
+            with SessionLocal.begin() as db:
+                db.execute(delete(User).where(User.id.in_(created)))
 
     def test_gemini_key_is_encrypted_and_user_status_updates(self):
         raw_key = "AIza" + "A" * 35

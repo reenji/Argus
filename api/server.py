@@ -11,7 +11,7 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from typing import Any
 
-from fastapi import Depends, FastAPI, HTTPException, WebSocket, WebSocketDisconnect, status
+from fastapi import Depends, FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect, status
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
@@ -158,8 +158,18 @@ def health() -> dict:
     return {"ok": True, "service": "argus-api"}
 
 
+def _client_ip(request: Request) -> str:
+    # uvicorn --proxy-headers already resolves X-Forwarded-For into client.host.
+    return request.client.host if request.client else "unknown"
+
+
 @app.post("/auth/signup", response_model=SessionView, status_code=201)
-async def signup(payload: UserCreate, db: Session = Depends(get_db)) -> SessionView:
+async def signup(
+    payload: UserCreate,
+    request: Request,
+    db: Session = Depends(get_db),
+) -> SessionView:
+    await limiter.consume(_client_ip(request), "signup_ip", 10, 3600)
     await limiter.consume(payload.email.lower(), "signup", 5, 3600)
     user = User(
         email=payload.email.lower().strip(),
@@ -177,8 +187,15 @@ async def signup(payload: UserCreate, db: Session = Depends(get_db)) -> SessionV
 
 
 @app.post("/auth/login", response_model=SessionView)
-async def login(payload: LoginRequest, db: Session = Depends(get_db)) -> SessionView:
-    await limiter.consume(payload.email.lower(), "login", 10, 300)
+async def login(
+    payload: LoginRequest,
+    request: Request,
+    db: Session = Depends(get_db),
+) -> SessionView:
+    ip = _client_ip(request)
+    await limiter.consume(ip, "login_ip", 50, 300)
+    # Keyed by email and IP so one address cannot lock everyone out of an account.
+    await limiter.consume(f"{payload.email.lower()}|{ip}", "login", 10, 300)
     user = db.scalar(select(User).where(User.email == payload.email.lower().strip()))
     if not user or not verify_password(payload.password, user.password_hash):
         raise HTTPException(status_code=401, detail="Email or password is incorrect")
