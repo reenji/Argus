@@ -154,6 +154,18 @@ class HostedApiTests(unittest.TestCase):
             os.environ.pop("REDIS_REQUIRED", None)
             self.assertFalse(Settings().redis_required)
 
+    def test_unexpected_errors_return_json_without_internals(self):
+        import api.server
+
+        client = TestClient(app, raise_server_exceptions=False)
+        with patch.object(
+            api.server.live_sessions, "status", side_effect=RuntimeError("redis at 10.0.0.5"),
+        ):
+            response = client.get("/status", headers=self.headers)
+        self.assertEqual(response.status_code, 500)
+        self.assertEqual(response.json()["detail"]["code"], "internal_error")
+        self.assertNotIn("10.0.0.5", response.text)
+
     def test_signups_are_limited_per_address(self):
         client = TestClient(app, client=(_random_address(), 50000))
         created = []
