@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import logging
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from typing import Any
@@ -21,6 +22,7 @@ from memory.memory_manager import format_memory_for_prompt, load_memory
 from .auth import get_current_user, websocket_user
 from .config import settings
 from .database import SessionLocal, get_db, init_db
+from .gemini_errors import gemini_http_error
 from .models import User
 from .rate_limit import limiter
 from .retention import purge_expired_user_data
@@ -42,6 +44,9 @@ from .secret_service import (
 )
 from .security import create_access_token, hash_password, verify_password
 from .websocket_client import WebSocketClient
+
+
+logger = logging.getLogger(__name__)
 
 
 class LiveSessionRegistry:
@@ -273,7 +278,11 @@ async def chat(
             )
             return str(response.text or "").strip()
 
-        response_text = await asyncio.to_thread(generate)
+        try:
+            response_text = await asyncio.to_thread(generate)
+        except Exception as exc:
+            logger.warning("Gemini chat failed for user %s: %r", user.id, exc)
+            raise gemini_http_error(exc) from exc
         if not response_text:
             raise HTTPException(status_code=502, detail="Gemini returned an empty response")
         add_chat_message(user.id, "assistant", response_text)
