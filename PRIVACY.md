@@ -205,9 +205,7 @@ O cliente web armazena o token em `localStorage`.
 
 O armazenamento de tokens em `localStorage` apresenta riscos específicos, especialmente em caso de comprometimento por código JavaScript malicioso ou vulnerabilidade de XSS. A implementação deverá ser avaliada e, quando possível, devem ser consideradas alternativas de armazenamento mais seguras, como cookies com atributos `HttpOnly`, `Secure` e `SameSite`.
 
-O mecanismo atualmente utilizado é stateless e o endpoint de logout não revoga retroativamente um token já emitido.
-
-**Recomenda-se corrigir esse comportamento antes de uma implantação comercial.**
+Ao sair (logout), o servidor invalida todos os tokens já emitidos para a conta e encerra a sessão de voz em andamento.
 
 ---
 
@@ -344,6 +342,8 @@ Os logs de ferramentas podem incluir:
 O código analisado limita determinados trechos de resultados exibidos nos logs a aproximadamente 80 caracteres.
 
 No serviço web, os logs HTTP padrão do servidor podem incluir informações como endereço remoto, rota acessada e código de status.
+
+No serviço web, os logs de diagnóstico registram o identificador interno do usuário e detalhes técnicos de erros (incluindo stack traces), mas não os parâmetros das ferramentas, como perguntas ou textos de mensagens.
 
 Esses logs podem ser coletados pelo servidor, container, sistema operacional, hospedagem ou provedor de infraestrutura utilizado na implantação.
 

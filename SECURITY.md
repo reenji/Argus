@@ -20,9 +20,12 @@ third-party services or accounts without authorization.
 ## Secure configuration
 
 - In production, set your own `JWT_SECRET`, `ARGUS_ENCRYPTION_KEY`,
-  `DATABASE_URL`, `REDIS_URL`, and `CORS_ORIGINS`. The API rejects the example
-  JWT secret, a missing encryption key, and a database other than PostgreSQL in
-  production (`api/config.py`).
+  `DATABASE_URL`, `REDIS_URL`, and `CORS_ORIGINS`. The API refuses to start in
+  production with secrets shorter than 32 characters or equal to each other,
+  a database other than PostgreSQL, `CORS_ORIGINS` that are missing or not
+  `https://`, or no reachable Redis (`api/config.py`, `api/rate_limit.py`).
+- Behind a proxy, set `CLIENT_IP_HEADER` or `TRUSTED_PROXY_HOPS` so rate limits
+  see real client addresses; `X-Forwarded-For` alone is written by the client.
 - Do not publish `.env`, OAuth credential files, databases, dumps, or local
   data. Restrict access to the database and provider logs.
 - Update dependencies and review microphone, screen, camera, filesystem, and

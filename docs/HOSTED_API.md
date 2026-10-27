@@ -1,6 +1,12 @@
-# Hosted API errors
+# Hosted API
 
-How the FastAPI service (`api/server.py`) reports failures to clients.
+How the FastAPI service (`api/server.py`) authenticates clients, reports
+failures and runs in production.
+
+Endpoints: `POST /auth/signup`, `POST /auth/login`, `GET /auth/me`,
+`POST /auth/logout`, `POST|DELETE /me/gemini-key`, `GET /status`, `GET /actions`,
+`POST /chat`, `GET /health` and the live WebSocket `/ws`. Authenticated routes
+take `Authorization: Bearer <token>`.
 
 ## HTTP
 
@@ -87,3 +93,13 @@ touch the server's files, desktop or network on the user's behalf:
 Email, flights, YouTube and every computer-control tool are desktop-only. Tools
 never fall back to the operator's `GEMINI_API_KEY` for a signed-in user, and
 tool arguments are not written to the server log.
+
+## Scaling
+
+Run **one API process on one machine**. The registry of live sessions (one per
+account, `session_replaced`, `/status`), the task queue and pending research
+and presentation results live in that process's memory; with several machines
+or uvicorn workers a second window would not replace the first and results
+could be looked up on the wrong instance. `scripts/start_web_api.sh` starts a
+single worker; on Fly keep `fly scale count 1`. Rate limits are already shared
+through Redis.

@@ -21,9 +21,13 @@ ou contas de terceiros sem autorização.
 ## Configuração segura
 
 - Em produção, defina `JWT_SECRET`, `ARGUS_ENCRYPTION_KEY`, `DATABASE_URL`,
-  `REDIS_URL` e `CORS_ORIGINS` próprios. A API recusa o segredo JWT de exemplo,
-  a ausência da chave de cifra ou banco que não seja PostgreSQL em ambiente de
-  produção (`api/config.py`).
+  `REDIS_URL` e `CORS_ORIGINS` próprios. A API não sobe em produção com
+  segredos de menos de 32 caracteres ou iguais entre si, banco que não seja
+  PostgreSQL, `CORS_ORIGINS` ausente ou sem `https://`, ou sem Redis acessível
+  (`api/config.py`, `api/rate_limit.py`).
+- Atrás de um proxy, defina `CLIENT_IP_HEADER` ou `TRUSTED_PROXY_HOPS` para que
+  os limites de taxa vejam o IP real; o `X-Forwarded-For` sozinho é escrito
+  pelo cliente.
 - Não publique `.env`, arquivos de credenciais OAuth, bancos, dumps ou dados
   locais. Restrinja acesso ao banco e aos logs do provedor.
 - Atualize dependências e revise permissões de microfone, tela, câmera, sistema

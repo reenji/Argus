@@ -70,9 +70,11 @@ client. Start the local stack with Docker:
 docker compose up --build
 ```
 
-Then open `http://localhost:3000`. See the [usage guide](docs/USAGE.md) for API,
-web client, and deployment configuration. Deployment templates are provided;
-they do not mean that a public hosted service is currently available.
+Then open `http://localhost:3000`. The [hosted API reference](docs/HOSTED_API.md)
+covers authentication, error and close codes, the tools available in the hosted
+app and how it scales; [`.env.example`](.env.example) lists the configuration.
+Deployment templates are provided; they do not mean that a public hosted
+service is currently available.
 
 ## Privacy and security
 
@@ -103,7 +105,7 @@ guarantee for other hardware or configurations.
 
 - [Usage guide](docs/USAGE.md)
 - [Tutorial](docs/TUTORIAL.md)
-- [Hosted API errors](docs/HOSTED_API.md)
+- [Hosted API reference](docs/HOSTED_API.md)
 - [Changelog](CHANGELOG.md)
 - [QA and audit guide](docs/QA.md)
 - [Contributing](CONTRIBUTING.md)
