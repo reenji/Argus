@@ -63,7 +63,9 @@ _pending_presentation_lock = threading.Lock()
 _pending_presentation_parameters: dict[str, Any] | None = None
 _pending_presentation_created_at = 0.0
 _tenant_pending_presentations: dict[str, tuple[dict[str, Any], float]] = {}
-_presentation_quota_cooldown_until = 0.0
+# Per user ("" on the desktop): one user's exhausted quota must not switch
+# off AI images for everyone else.
+_presentation_quota_cooldown_until: dict[str, float] = {}
 _presentation_output_locks_guard = threading.Lock()
 _presentation_output_locks: dict[str, threading.Lock] = {}
 
@@ -125,15 +127,23 @@ def _is_quota_error(error: Exception) -> bool:
     return any(token in message for token in ("429", "quota", "resource_exhausted", "rate limit"))
 
 
+def _cooldown_owner() -> str:
+    from core.tenant import get_current_user_id
+
+    return get_current_user_id() or ""
+
+
 def _presentation_quota_cooldown_active() -> bool:
-    return time.monotonic() < _presentation_quota_cooldown_until
+    return time.monotonic() < _presentation_quota_cooldown_until.get(_cooldown_owner(), 0.0)
 
 
 def _mark_presentation_quota_cooldown() -> None:
-    global _presentation_quota_cooldown_until
-    _presentation_quota_cooldown_until = (
-        time.monotonic() + PRESENTATION_QUOTA_COOLDOWN_SECONDS
-    )
+    now = time.monotonic()
+    # Drop expired entries so the map does not grow with every user ever seen.
+    for owner, until in list(_presentation_quota_cooldown_until.items()):
+        if until <= now:
+            del _presentation_quota_cooldown_until[owner]
+    _presentation_quota_cooldown_until[_cooldown_owner()] = now + PRESENTATION_QUOTA_COOLDOWN_SECONDS
 
 
 def _output_lock_for(path: Path) -> threading.Lock:

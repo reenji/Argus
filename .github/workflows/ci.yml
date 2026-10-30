@@ -52,6 +52,7 @@ jobs:
           tests.test_phase1_decoupling tests.test_hosted_api tests.test_core_resilience
           tests.test_qa_system tests.test_api_key_validation tests.test_action_helpers
           tests.test_cloud_tools tests.test_live_engine tests.test_data_layer
+          tests.test_tenant_isolation
 
   frontend:
     runs-on: ubuntu-latest

@@ -28,6 +28,9 @@ def save_api_keys(gemini_api_key: str) -> None:
         with SessionLocal() as db:
             set_user_secret(db, user_id, "gemini_api_key", gemini_api_key.strip())
         return
+    from core.tenant import require_local_storage
+
+    require_local_storage("API keys")
     ensure_config_dir()
 
     data: dict = {}
@@ -55,6 +58,9 @@ def load_api_keys() -> dict:
         with SessionLocal() as db:
             key = get_user_secret(db, user_id, "gemini_api_key")
         return {"gemini_api_key": key} if key else {}
+    from core.tenant import require_local_storage
+
+    require_local_storage("API keys")
     if not CONFIG_FILE.exists():
         return {}
     try:
@@ -68,6 +74,10 @@ def get_gemini_key() -> str | None:
 
     if get_current_user_id():
         return load_api_keys().get("gemini_api_key")
+    from core.tenant import require_local_storage
+
+    # GEMINI_API_KEY is the operator's key; hosted users must bring their own.
+    require_local_storage("Gemini key")
     key = os.environ.get("GEMINI_API_KEY")
     if isinstance(key, str) and key.strip():
         return key.strip()

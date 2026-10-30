@@ -19,8 +19,13 @@ RUN apt-get update \
 COPY requirements.txt ./
 RUN pip install --upgrade pip && pip install -r requirements.txt
 
-COPY . .
+# Run as an unprivileged user: hosted tools act on model-chosen input, so a
+# mistake must not be able to touch anything outside this user's files.
+RUN useradd --create-home --uid 10001 argus && chown argus:argus /app
+
+COPY --chown=argus:argus . .
 RUN chmod +x scripts/start_web_api.sh
 
+USER argus
 EXPOSE 8000
 CMD ["./scripts/start_web_api.sh"]

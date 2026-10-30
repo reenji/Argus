@@ -43,6 +43,20 @@ class Task:
     cancel_flag: threading.Event = field(compare=False, default_factory=threading.Event)
 
 
+# One process serves every hosted user; cap what a single user can queue.
+MAX_TASKS_PER_USER = 3
+
+
+class TaskLimitError(RuntimeError):
+    """The user already has MAX_TASKS_PER_USER unfinished tasks."""
+
+
+def _current_user() -> str | None:
+    from core.tenant import get_current_user_id
+
+    return get_current_user_id()
+
+
 class TaskQueue:
     def __init__(self, max_concurrent: int = 2, awareness=None):
         self._queue:        list[Task]       = []
@@ -89,8 +103,8 @@ class TaskQueue:
         immediate:   bool = False,
     ) -> str:
 
-        from core.tenant import get_current_user_id
-
+        user_id = _current_user()
+        self._check_user_limit(user_id)
         task_id = str(uuid.uuid4())[:8]
         task    = Task(
             priority    = priority.value,
@@ -99,7 +113,7 @@ class TaskQueue:
             goal        = goal,
             speak       = speak,
             on_complete = on_complete,
-            user_id     = get_current_user_id(),
+            user_id     = user_id,
         )
 
         start_now = False
@@ -138,8 +152,8 @@ class TaskQueue:
         kind: str = "presentation",
     ) -> str:
         """Submit a specialized callable without routing it through AgentExecutor."""
-        from core.tenant import get_current_user_id
-
+        user_id = _current_user()
+        self._check_user_limit(user_id)
         task_id = str(uuid.uuid4())[:8]
         task = Task(
             priority=priority.value,
@@ -151,7 +165,7 @@ class TaskQueue:
             on_cancel=on_cancel,
             runner=runner,
             kind=kind,
-            user_id=get_current_user_id(),
+            user_id=user_id,
         )
         with self._condition:
             self._queue.append(task)
@@ -161,11 +175,30 @@ class TaskQueue:
         print(f"[TaskQueue] 📥 {kind} job queued: [{task_id}] {goal[:60]}")
         return task_id
 
+    def _check_user_limit(self, user_id: str | None) -> None:
+        if not user_id:
+            return
+        with self._lock:
+            unfinished = sum(
+                1 for task in self._tasks.values()
+                if task.user_id == user_id and task.status in (TaskStatus.PENDING, TaskStatus.RUNNING)
+            )
+        if unfinished >= MAX_TASKS_PER_USER:
+            raise TaskLimitError(
+                f"You already have {unfinished} tasks in progress. Wait for one to finish."
+            )
+
+    @staticmethod
+    def _visible(task: "Task") -> bool:
+        """Hosted users see only their own tasks; the desktop sees all."""
+        user_id = _current_user()
+        return user_id is None or task.user_id == user_id
+
     def cancel(self, task_id: str) -> bool:
         on_cancel = None
         with self._lock:
             task = self._tasks.get(task_id)
-            if not task:
+            if not task or not self._visible(task):
                 return False
             if task.status in (TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.CANCELLED):
                 return False
@@ -194,7 +227,7 @@ class TaskQueue:
     def get_status(self, task_id: str) -> dict | None:
         with self._lock:
             task = self._tasks.get(task_id)
-            if not task:
+            if not task or not self._visible(task):
                 return None
             return {
                 "task_id": task.task_id,
@@ -221,6 +254,7 @@ class TaskQueue:
                     "phase": t.phase,
                 }
                 for t in self._tasks.values()
+                if self._visible(t)
             ]
 
     def pending_count(self) -> int:
@@ -254,10 +288,20 @@ class TaskQueue:
     def _next_task(self) -> Task | None:
         if self._active_count >= self._max_concurrent:
             return None
-        for task in self._queue:
-            if task.status == TaskStatus.PENDING and not task.cancel_flag.is_set():
+        ready = [
+            task for task in self._queue
+            if task.status == TaskStatus.PENDING and not task.cancel_flag.is_set()
+        ]
+        # Serve users with nothing running first, so one user's batch cannot
+        # hold every worker while others wait.
+        busy = {
+            task.user_id for task in self._tasks.values()
+            if task.status == TaskStatus.RUNNING and task.user_id
+        }
+        for task in ready:
+            if task.user_id not in busy:
                 return task
-        return None
+        return ready[0] if ready else None
 
     def _run_task(self, task: Task) -> None:
         if task.user_id:
