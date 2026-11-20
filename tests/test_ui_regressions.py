@@ -1,13 +1,9 @@
 import json
-import inspect
 import os
 import tempfile
 import unittest
-import asyncio
-from datetime import datetime
 from pathlib import Path
-from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -19,11 +15,6 @@ import ui
 class _NoSecrets:
     def get(self, _key):
         return None
-
-
-class _MetricsSnapshot:
-    def snapshot(self):
-        return {"cpu": 1.0, "mem": 1.0, "net": 0.0, "gpu": -1.0, "tmp": -1.0}
 
 
 class UIRegressionTests(unittest.TestCase):
