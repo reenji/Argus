@@ -28,6 +28,8 @@ class User(Base):
     password_hash: Mapped[str] = mapped_column(Text)
     # Bumped on logout; tokens carrying an older version stop working.
     session_version: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    # Set when the owner opens the emailed link; null means the address is unconfirmed.
+    email_verified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=_now, onupdate=_now
