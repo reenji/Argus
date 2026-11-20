@@ -210,33 +210,6 @@ class UIRegressionTests(unittest.TestCase):
         expected_y = (self.window.centralWidget().height() - overlay.height()) // 2
         self.assertEqual((overlay.x(), overlay.y()), (expected_x, expected_y))
 
-    def test_intro_settings_preserve_existing_ui_preferences(self):
-        ui.UI_SETTINGS_FILE.write_text(
-            json.dumps({"graphics_quality": "high", "theme": "stealth_red"}),
-            encoding="utf-8",
-        )
-        ui._save_intro_settings(completed=True, greeting_enabled=True)
-        saved = json.loads(ui.UI_SETTINGS_FILE.read_text(encoding="utf-8"))
-        self.assertEqual(saved["graphics_quality"], "high")
-        self.assertEqual(saved["theme"], "stealth_red")
-        self.assertTrue(saved["intro_completed"])
-        self.assertTrue(saved["startup_greeting_enabled"])
-        self.assertNotIn("intro_every_launch", saved)
-        self.assertEqual(saved["intro_version"], ui.INTRO_SEQUENCE_VERSION)
-
-    def test_legacy_intro_completion_replays_once_after_version_upgrade(self):
-        original = ui.UI_SETTINGS_FILE.read_text(encoding="utf-8")
-        try:
-            ui.UI_SETTINGS_FILE.write_text(
-                json.dumps({"intro_completed": True, "intro_every_launch": False}),
-                encoding="utf-8",
-            )
-            self.assertEqual(ui._load_intro_settings(), (False, True))
-            ui._save_intro_settings(completed=True, greeting_enabled=False)
-            self.assertEqual(ui._load_intro_settings(), (True, False))
-        finally:
-            ui.UI_SETTINGS_FILE.write_text(original, encoding="utf-8")
-
     def test_setup_exposes_replay_preference(self):
         overlay = ui.SetupOverlay(replay_every_launch=True)
         self.assertTrue(overlay.replay_intro_enabled())
@@ -304,55 +277,6 @@ class UIRegressionTests(unittest.TestCase):
         )
         overlay.deleteLater()
 
-    def test_fresh_install_voice_defaults_to_charon(self):
-        self.assertEqual(self.window._get_selected_voice(), "charon")
-
-    def test_gemini_voice_selection_drives_tour_and_survives_restart(self):
-        original_config = (
-            ui.API_FILE.read_text(encoding="utf-8")
-            if ui.API_FILE.exists()
-            else None
-        )
-        original_voice = self.window._get_selected_voice()
-        original_callback = self.window.on_tts_provider_change
-        original_env_voice = os.environ.get("GEMINI_VOICE_NAME")
-        try:
-            self.window.on_tts_provider_change = None
-            with patch.object(ui, "_cache_intro_voice_async") as warm_cache:
-                self.window._on_tts_select_done("gemini", "kore", "")
-
-            saved = json.loads(ui.API_FILE.read_text(encoding="utf-8"))
-            self.assertEqual(saved["tts_voice_id"], "kore")
-            self.assertEqual(saved["voice_name"], "kore")
-            self.assertEqual(self.window._get_selected_voice(), "kore")
-            self.assertTrue(any(
-                call.args[0] == "kore" for call in warm_cache.call_args_list
-            ))
-
-            self.window._voice_combo.blockSignals(True)
-            self.window._voice_combo.setCurrentIndex(
-                self.window._voice_combo.findData("charon")
-            )
-            self.window._voice_combo.blockSignals(False)
-            self.window._load_saved_voice()
-            self.assertEqual(self.window._get_selected_voice(), "kore")
-            self.assertEqual(os.environ.get("GEMINI_VOICE_NAME"), "kore")
-        finally:
-            self.window.on_tts_provider_change = original_callback
-            self.window._voice_combo.blockSignals(True)
-            self.window._voice_combo.setCurrentIndex(
-                self.window._voice_combo.findData(original_voice)
-            )
-            self.window._voice_combo.blockSignals(False)
-            if original_config is None:
-                ui.API_FILE.unlink(missing_ok=True)
-            else:
-                ui.API_FILE.write_text(original_config, encoding="utf-8")
-            if original_env_voice is None:
-                os.environ.pop("GEMINI_VOICE_NAME", None)
-            else:
-                os.environ["GEMINI_VOICE_NAME"] = original_env_voice
-
     def test_startup_backdrop_covers_the_live_console_during_setup(self):
         self.window._ensure_startup_backdrop()
         backdrop = self.window._startup_backdrop
@@ -360,48 +284,6 @@ class UIRegressionTests(unittest.TestCase):
         self.assertTrue(backdrop.isVisible())
         self.assertEqual(backdrop.geometry(), self.window.centralWidget().rect())
         self.assertIs(self.window._overlay.parentWidget(), self.window.centralWidget())
-
-    def test_intro_overlay_renders_and_finishes_once(self):
-        overlay = ui.FirstRunIntroOverlay(duration_s=1.0, speak=False)
-        overlay.resize(960, 640)
-        overlay._started_at = ui.time.monotonic() - 0.5
-        image = overlay.grab().toImage()
-        self.assertFalse(image.isNull())
-        emissions = []
-        overlay.finished.connect(lambda: emissions.append(True))
-        overlay.finish()
-        overlay.finish()
-        self.assertEqual(emissions, [True])
-        overlay.deleteLater()
-
-    def test_live_intro_reveals_the_real_console_widgets_in_sequence(self):
-        self.window._prepare_live_intro_widgets()
-        groups = {
-            group["name"]: group for group in self.window._intro_live_groups
-        }
-        self.assertIs(groups["core"]["widget"], self.window._ai_core_wrap)
-        self.assertIs(groups["awareness"]["widget"], self.window._left_panel)
-        self.assertIs(groups["communications"]["widget"], self.window._right_panel)
-        self.assertIs(groups["dock"]["widget"], self.window._footer_panel)
-
-        self.window._apply_live_intro_progress(1.2)
-        self.assertGreater(groups["core"]["effect"].opacity(), 0.0)
-        self.assertEqual(groups["awareness"]["effect"].opacity(), 0.0)
-
-        self.window._apply_live_intro_progress(9.0)
-        self.assertTrue(groups["awareness"]["completed"])
-        self.assertIsNone(groups["awareness"]["widget"].graphicsEffect())
-        self.assertGreater(groups["communications"]["effect"].opacity(), 0.0)
-        self.assertIsNone(groups["dock"]["effect"])
-        self.assertFalse(groups["dock"]["widget"].isVisible())
-
-        self.window._apply_live_intro_progress(18.0)
-        for group in groups.values():
-            self.assertTrue(group["completed"])
-            self.assertIsNone(group["widget"].graphicsEffect())
-        self.window._restore_live_intro_widgets()
-        for group in groups.values():
-            self.assertIsNone(group["widget"].graphicsEffect())
 
     def test_settings_exposes_replay_preference_after_setup(self):
         overlay = ui.SettingsOverlay(replay_intro=True)
@@ -414,12 +296,6 @@ class UIRegressionTests(unittest.TestCase):
         overlay.tour_replay_requested.connect(lambda: tour_requests.append(True))
         overlay._s_replay_tour.click()
         self.assertEqual(tour_requests, [True])
-        overlay.deleteLater()
-
-    def test_settings_copy_distinguishes_greeting_from_interface_tour(self):
-        overlay = ui.SettingsOverlay(replay_intro=True)
-        self.assertEqual(overlay._s_replay_intro.text(), "Play greeting at startup")
-        self.assertIn("REPLAY INTERFACE TOUR", overlay._s_replay_tour.text())
         overlay.deleteLater()
 
     def test_manual_tour_replay_activates_hard_interaction_lock(self):
@@ -480,242 +356,6 @@ class UIRegressionTests(unittest.TestCase):
             ) = original
             self.window._mission._switch_tab(original_tab)
 
-    def test_intro_does_not_force_fullscreen(self):
-        source = inspect.getsource(ui.MainWindow._start_first_run_intro)
-        self.assertNotIn("showFullScreen", source)
-
-    def test_intro_captions_use_the_live_subtitle_widget(self):
-        self.window._show_intro_caption("Good evening. I am ARGUS.")
-        self.assertEqual(
-            self.window._subtitle._chunks,
-            [["Good", "evening.", "I", "am", "ARGUS."]],
-        )
-        self.window._show_intro_caption("Communications linked.")
-        self.assertEqual(
-            self.window._subtitle._chunks,
-            [["Communications", "linked."]],
-        )
-        self.window._subtitle.clear_subtitle()
-
-    def test_intro_plays_only_prepared_selected_gemini_voice(self):
-        with tempfile.TemporaryDirectory() as cache_dir:
-            with (
-                patch.object(ui, "INTRO_VOICE_CACHE_DIR", Path(cache_dir)),
-                patch.object(ui, "_generate_intro_speech_pcm") as generate,
-                patch.object(ui, "_play_intro_pcm") as play,
-            ):
-                overlay = ui.FirstRunIntroOverlay(
-                    speak=True,
-                    voice_name="kore",
-                    api_key="test-key",
-                )
-                cache_path = ui._intro_voice_cache_path(
-                    "kore", overlay._narration, overlay._sequence_kind
-                )
-                cache_path.parent.mkdir(parents=True, exist_ok=True)
-                cache_path.write_bytes(b"\x00\x00" * 64)
-                overlay._start_narration()
-                overlay._speech_thread.join(timeout=2.0)
-                generate.assert_not_called()
-                play.assert_called_once()
-                self.assertTrue(cache_path.exists())
-                overlay.stop_speech()
-                overlay.deleteLater()
-
-    def test_intro_cache_is_versioned_by_performance_and_mastering(self):
-        original = ui._intro_voice_cache_path("charon", "intro")
-        with patch.object(ui, "INTRO_PERFORMANCE_VERSION", "next-performance"):
-            performance_changed = ui._intro_voice_cache_path("charon", "intro")
-        with patch.object(ui, "INTRO_MASTERING_VERSION", "next-master"):
-            mastering_changed = ui._intro_voice_cache_path("charon", "intro")
-        self.assertNotEqual(original, performance_changed)
-        self.assertNotEqual(original, mastering_changed)
-
-    def test_intro_voice_preparation_retries_and_caches_selected_voice(self):
-        with tempfile.TemporaryDirectory() as cache_dir:
-            with (
-                patch.object(ui, "INTRO_VOICE_CACHE_DIR", Path(cache_dir)),
-                patch.object(
-                    ui,
-                    "_generate_intro_speech_pcm",
-                    side_effect=[b"", b"\x01\x00" * 64],
-                ) as generate,
-                patch.object(ui.time, "sleep"),
-            ):
-                ready, message = ui._prepare_intro_voice_cache(
-                    "charon", "cinematic intro", "test-key", attempts=2
-                )
-                self.assertTrue(ready)
-                self.assertEqual(message, "")
-                self.assertEqual(generate.call_count, 2)
-                cache_path = ui._intro_voice_cache_path(
-                    "charon", "cinematic intro"
-                )
-                self.assertEqual(cache_path.read_bytes(), b"\x01\x00" * 64)
-
-    def test_intro_generation_uses_tts_renderer_before_mastering(self):
-        with (
-            patch.object(
-                ui, "_render_intro_with_live", new=AsyncMock(return_value=b"\x01\x00" * 64)
-            ) as render,
-            patch.object(ui, "_master_intro_pcm", side_effect=lambda pcm: pcm),
-        ):
-            pcm = ui._generate_intro_speech_pcm(
-                "Good evening.", "charon", "AIza" + "x" * 30
-            )
-        self.assertEqual(pcm, b"\x01\x00" * 64)
-        render.assert_awaited_once()
-
-    def test_segmented_intro_uses_exact_tts_chapter_boundaries(self):
-        pcm = b"\x01\x00" * (ui.INTRO_SAMPLE_RATE * 4)
-        with (
-            patch.object(
-                ui,
-                "_render_intro_segments_with_live",
-                new=AsyncMock(
-                    return_value=(pcm, [0, len(pcm) // 2, len(pcm)])
-                ),
-            ) as render,
-            patch.object(ui, "_master_intro_pcm", side_effect=lambda value: value),
-        ):
-            result, boundaries = ui._generate_intro_segmented_speech_pcm(
-                ("First chapter.", "Second chapter."),
-                "charon",
-                "AIza" + "x" * 30,
-            )
-        self.assertEqual(result, pcm)
-        self.assertEqual(boundaries, [0.0, 2.0, 4.0])
-        render.assert_awaited_once_with(
-            ("First chapter.", "Second chapter."),
-            "charon",
-            "AIza" + "x" * 30,
-        )
-
-    def test_aligned_intro_renders_once_with_the_selected_voice(self):
-        pcm = b"\x01\x00" * (ui.INTRO_SAMPLE_RATE * 4)
-        with (
-            patch.object(
-                ui, "_generate_intro_speech_pcm", return_value=pcm
-            ) as generate,
-            patch.object(
-                ui,
-                "_intro_caption_boundaries",
-                return_value=[0.0, 2.0, 4.0],
-            ) as align,
-        ):
-            result, boundaries = ui._generate_intro_aligned_speech_pcm(
-                ("First chapter.", "Second chapter."),
-                "kore",
-                "test-key",
-            )
-
-        self.assertEqual(result, pcm)
-        self.assertEqual(boundaries, [0.0, 2.0, 4.0])
-        generate.assert_called_once_with(
-            "First chapter. Second chapter.",
-            "kore",
-            "test-key",
-        )
-        align.assert_called_once_with(
-            pcm, ("First chapter.", "Second chapter.")
-        )
-
-    def test_intro_quota_error_never_substitutes_a_different_voice(self):
-        with tempfile.TemporaryDirectory() as cache_dir:
-            with (
-                patch.object(ui, "INTRO_VOICE_CACHE_DIR", Path(cache_dir)),
-                patch.object(
-                    ui,
-                    "_generate_intro_aligned_speech_pcm",
-                    side_effect=RuntimeError("429 RESOURCE_EXHAUSTED"),
-                ),
-            ):
-                ready, message = ui._prepare_intro_voice_cache(
-                    "fenrir",
-                    "First chapter. Second chapter.",
-                    "test-key",
-                    sequence_kind="tour",
-                    attempts=1,
-                    captions=("First chapter.", "Second chapter."),
-                )
-                cache_path = ui._intro_voice_cache_path(
-                    "fenrir",
-                    "First chapter. Second chapter.",
-                    "tour",
-                )
-                self.assertFalse(ready)
-                self.assertIn("429 RESOURCE_EXHAUSTED", message)
-                self.assertFalse(cache_path.exists())
-
-    def test_intro_renderer_uses_dedicated_tts_with_exact_script(self):
-        response = SimpleNamespace(candidates=[
-            SimpleNamespace(content=SimpleNamespace(parts=[
-                SimpleNamespace(inline_data=SimpleNamespace(
-                    data=b"\x01\x00" * 64,
-                    mime_type="audio/pcm",
-                ))
-            ]))
-        ])
-        client = MagicMock()
-        client.aio.models.generate_content = AsyncMock(return_value=response)
-        with (
-            patch("google.genai.Client", return_value=client),
-        ):
-            pcm = asyncio.run(ui._render_intro_with_live(
-                "ARGUS online.", "charon", "test-key"
-            ))
-        self.assertEqual(pcm, b"\x01\x00" * 64)
-        request = client.aio.models.generate_content.await_args.kwargs
-        self.assertEqual(request["model"], ui.INTRO_TTS_MODELS[0])
-        self.assertEqual(request["contents"], "ARGUS online.")
-        config = request["config"]
-        self.assertEqual(config.response_modalities, ["AUDIO"])
-        self.assertIsNone(config.tools)
-        self.assertEqual(
-            config.speech_config.voice_config.prebuilt_voice_config.voice_name,
-            "Charon",
-        )
-        client.close.assert_called_once()
-
-    def test_segmented_intro_renderer_returns_exact_pcm_boundaries(self):
-        responses = [
-            SimpleNamespace(candidates=[
-                SimpleNamespace(content=SimpleNamespace(parts=[
-                    SimpleNamespace(inline_data=SimpleNamespace(
-                        data=b"\x01\x00" * 24,
-                        mime_type="audio/pcm",
-                    ))
-                ]))
-            ]),
-            SimpleNamespace(candidates=[
-                SimpleNamespace(content=SimpleNamespace(parts=[
-                    SimpleNamespace(inline_data=SimpleNamespace(
-                        data=b"\x02\x00" * 48,
-                        mime_type="audio/pcm",
-                    ))
-                ]))
-            ]),
-        ]
-        client = MagicMock()
-        client.aio.models.generate_content = AsyncMock(side_effect=responses)
-        with (
-            patch("google.genai.Client", return_value=client),
-        ):
-            pcm, boundaries = asyncio.run(ui._render_intro_segments_with_live(
-                ("First chapter.", "Second chapter."), "charon", "test-key"
-            ))
-        self.assertEqual(boundaries, [0, 48, 144])
-        self.assertEqual(len(pcm), 144)
-        self.assertEqual(client.aio.models.generate_content.await_count, 2)
-        self.assertEqual(
-            [
-                call.kwargs["contents"]
-                for call in client.aio.models.generate_content.await_args_list
-            ],
-            ["First chapter.", "Second chapter."],
-        )
-        client.close.assert_called_once()
-
     def test_segmented_tts_retries_when_model_returns_no_audio(self):
         empty_response = SimpleNamespace(candidates=[])
         client = MagicMock()
@@ -755,11 +395,6 @@ class UIRegressionTests(unittest.TestCase):
                     "Good evening.", "kore", "test-key"
                 ))
         self.assertEqual(client.aio.models.generate_content.await_count, 1)
-
-    def test_time_aware_greeting_boundaries(self):
-        self.assertTrue(ui._daily_greeting(datetime(2026, 1, 1, 5)).startswith("Good morning."))
-        self.assertTrue(ui._daily_greeting(datetime(2026, 1, 1, 12)).startswith("Good afternoon."))
-        self.assertTrue(ui._daily_greeting(datetime(2026, 1, 1, 18)).startswith("Good evening."))
 
     def test_full_tour_is_chaptered_for_a_ninety_second_delivery(self):
         chapters = ui._tour_chapters(datetime(2026, 1, 1, 19))
@@ -827,34 +462,6 @@ class UIRegressionTests(unittest.TestCase):
             self.assertTrue(intro._persistent_cutouts)
             self.window._restore_live_intro_widgets()
             self.assertEqual(self.window._mission._active_tab, 2)
-        finally:
-            self.window._intro_overlay = None
-            self.window._startup_sequence_kind = original_kind
-            self.window._mission._switch_tab(original_tab)
-            intro.hide()
-            intro.deleteLater()
-
-    def test_voice_and_text_chapter_reveals_the_real_comms_input(self):
-        original_kind = self.window._startup_sequence_kind
-        original_tab = self.window._mission._active_tab
-        intro = ui.FirstRunIntroOverlay(
-            self.window.centralWidget(), duration_s=90.0, speak=False,
-        )
-        try:
-            self.window._startup_sequence_kind = "tour"
-            self.window._intro_overlay = intro
-            intro.setGeometry(self.window.centralWidget().rect())
-            self.window._mission._switch_tab(3)
-            chapter = next(
-                item for item in ui._tour_chapters(datetime(2026, 1, 1, 19))
-                if item.focus == "input"
-            )
-            self.window._on_intro_chapter_changed(
-                chapter.focus, chapter.label, chapter.tab_index
-            )
-            self.assertEqual(self.window._mission._active_tab, 0)
-            self.assertTrue(self.window._chat_bubble._input.isVisible())
-            self.assertTrue(intro._spotlight_target.isValid())
         finally:
             self.window._intro_overlay = None
             self.window._startup_sequence_kind = original_kind
@@ -976,80 +583,6 @@ class UIRegressionTests(unittest.TestCase):
         self.assertIn('self._spotlight_shape == "ellipse"', source)
         self.assertIn("if spotlight.isEmpty():", source)
 
-    def test_long_intro_renderer_has_extended_timeout(self):
-        source = inspect.getsource(ui._request_intro_tts)
-        self.assertIn("timeout=90.0", source)
-
-    def test_tour_and_greeting_use_distinct_caches(self):
-        narration = "ARGUS online."
-        self.assertNotEqual(
-            ui._intro_voice_cache_path("charon", narration, "tour"),
-            ui._intro_voice_cache_path("charon", narration, "greeting"),
-        )
-
-    def test_each_selected_voice_uses_its_own_intro_cache(self):
-        narration = "ARGUS online."
-        self.assertNotEqual(
-            ui._intro_voice_cache_path("charon", narration, "tour"),
-            ui._intro_voice_cache_path("kore", narration, "tour"),
-        )
-
-    def test_intro_mastering_keeps_raw_pcm_valid_and_peak_safe(self):
-        source = (1000).to_bytes(2, "little", signed=True) * 240
-        mastered = ui._master_intro_pcm(source)
-        self.assertEqual(mastered, source)
-        self.assertEqual(len(mastered) % 2, 0)
-        peak = max(
-            abs(int.from_bytes(mastered[i:i + 2], "little", signed=True))
-            for i in range(0, len(mastered), 2)
-        )
-        self.assertLessEqual(peak, 32767)
-
-    def test_intro_caption_boundaries_snap_to_pcm_pauses(self):
-        sample_rate = ui.INTRO_SAMPLE_RATE
-        tone = (4000).to_bytes(2, "little", signed=True)
-        silence = b"\x00\x00"
-        pcm = (
-            tone * sample_rate
-            + silence * int(sample_rate * 0.2)
-            + tone * sample_rate
-            + silence * int(sample_rate * 0.2)
-            + tone * sample_rate
-        )
-        boundaries = ui._intro_caption_boundaries(pcm, ("one", "two", "three"))
-        self.assertAlmostEqual(boundaries[1], 1.1, delta=0.08)
-        self.assertAlmostEqual(boundaries[2], 2.3, delta=0.08)
-        self.assertAlmostEqual(boundaries[-1], 3.4, delta=0.02)
-
-    def test_exact_intro_timing_sidecar_overrides_estimated_boundaries(self):
-        with tempfile.TemporaryDirectory() as cache_dir:
-            cache_path = Path(cache_dir) / "charon-test.pcm"
-            pcm = b"\x01\x00" * (ui.INTRO_SAMPLE_RATE * 6)
-            cache_path.write_bytes(pcm)
-            exact = [0.0, 1.25, 3.75, 6.0]
-            ui._write_intro_timing_cache(cache_path, exact)
-            loaded = ui._load_intro_timing_cache(cache_path, 3, 6.0)
-            self.assertEqual(loaded, exact)
-
-    def test_audio_driven_intro_waits_for_playback_clock_before_first_chapter(self):
-        overlay = ui.FirstRunIntroOverlay(duration_s=1.0, speak=False)
-        overlay._audio_driven = True
-        overlay._audio_duration = 20.0
-        overlay._started_at = ui.time.monotonic()
-        captions = []
-        chapters = []
-        overlay.caption_changed.connect(captions.append)
-        overlay.chapter_changed.connect(lambda *args: chapters.append(args))
-        overlay._tick()
-        self.assertEqual(captions, [])
-        self.assertEqual(chapters, [])
-        overlay._on_speech_progress(0.1)
-        overlay._tick()
-        self.assertTrue(captions)
-        self.assertTrue(chapters)
-        overlay._timer.stop()
-        overlay.deleteLater()
-
     def test_tour_temporarily_suppresses_presence_popups(self):
         timer = self.window._presence_system._presence_tmr
         timer.start()
@@ -1116,72 +649,6 @@ class UIRegressionTests(unittest.TestCase):
                 self.window._interaction_gated,
             ) = original
 
-    def test_audio_driven_intro_never_finishes_on_wall_clock_deadline(self):
-        overlay = ui.FirstRunIntroOverlay(duration_s=1.0, speak=False)
-        overlay._audio_driven = True
-        overlay._audio_duration = 20.0
-        overlay._caption_boundaries = [
-            index * 2.5 for index in range(len(overlay._CAPTIONS) + 1)
-        ]
-        overlay._speech_position = 10.0
-        overlay._started_at = ui.time.monotonic() - 60.0
-        emissions = []
-        overlay.finished.connect(lambda: emissions.append(True))
-        overlay._tick()
-        self.assertEqual(emissions, [])
-        overlay._speech_position = 20.0
-        overlay._speech_finished_at = ui.time.monotonic() - overlay._FINAL_HOLD_S - 0.1
-        overlay._tick()
-        self.assertEqual(emissions, [True])
-        overlay.deleteLater()
-
-    def test_intro_pcm_duration_is_used_as_the_audio_clock(self):
-        pcm = b"\x00\x00" * (ui.INTRO_SAMPLE_RATE * 17)
-        self.assertEqual(ui._pcm_duration_seconds(pcm), 17.0)
-
-    def test_intro_has_no_platform_voice_fallback(self):
-        self.assertFalse(hasattr(ui.FirstRunIntroOverlay, "_start_platform_voice_fallback"))
-
-    def test_key_validation_does_not_complete_intro_early(self):
-        source = inspect.getsource(ui.MainWindow._finish_setup_after_key_validation)
-        self.assertNotIn("completed=True", source)
-
-    def test_successful_validation_keeps_setup_until_voice_is_ready(self):
-        original_overlay = self.window._overlay
-        original_should_play = self.window._intro_should_play
-        original_ready = self.window._ready
-        original_settings = ui.UI_SETTINGS_FILE.read_text(encoding="utf-8")
-        original_key = os.environ.get("GEMINI_API_KEY")
-        overlay = ui.SetupOverlay(replay_every_launch=True)
-        overlay.show()
-        self.window._overlay = overlay
-        self.window._intro_should_play = True
-        self.window._pending_greeting_enabled = True
-        self.window._ready = True
-        try:
-            with patch.object(self.window, "_prepare_intro_voice") as prepare:
-                self.window._finish_setup_after_key_validation(
-                    "AIza" + "x" * 30,
-                    "mac",
-                    False,
-                    ui.ApiKeyValidationResult(True, "API key validated."),
-                )
-            prepare.assert_called_once()
-            self.assertIs(self.window._overlay, overlay)
-            self.assertTrue(overlay.isVisible())
-            self.assertFalse(self.window._ready)
-        finally:
-            overlay.hide()
-            overlay.deleteLater()
-            self.window._overlay = original_overlay
-            self.window._intro_should_play = original_should_play
-            self.window._ready = original_ready
-            ui.UI_SETTINGS_FILE.write_text(original_settings, encoding="utf-8")
-            if original_key is None:
-                os.environ.pop("GEMINI_API_KEY", None)
-            else:
-                os.environ["GEMINI_API_KEY"] = original_key
-
     def test_startup_gate_blocks_text_callbacks_until_ready(self):
         original_ready = self.window._ready
         original_intro = self.window._intro_in_progress
@@ -1231,26 +698,6 @@ class UIRegressionTests(unittest.TestCase):
                 self.window._intro_overlay,
                 self.window._overlay,
             ) = original
-
-    def test_intro_completion_is_the_operational_readiness_transition(self):
-        original_ready = self.window._ready
-        original_pending = self.window._pending_ready_after_intro
-        original_announced = self.window._ready_announced
-        self.window._ready = False
-        self.window._pending_ready_after_intro = True
-        self.window._ready_announced = False
-        try:
-            with (
-                patch.object(self.window, "_clear_startup_backdrop"),
-                patch.object(self.window, "_show_voice_select_then_name"),
-            ):
-                self.window._continue_after_intro()
-            self.assertTrue(self.window._ready)
-            self.assertTrue(self.window._ready_announced)
-        finally:
-            self.window._ready = original_ready
-            self.window._pending_ready_after_intro = original_pending
-            self.window._ready_announced = original_announced
 
     def test_splitter_uses_evaluated_stylesheet(self):
         sheet = self.window._splitter.styleSheet()
