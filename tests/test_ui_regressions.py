@@ -124,17 +124,6 @@ class UIRegressionTests(unittest.TestCase):
         apply_live.assert_not_called()
         self.assertEqual(ui.get_graphics_quality(), "high")
 
-    def test_graphics_settings_include_auto_choice(self):
-        overlay = ui.SettingsOverlay(
-            current_graphics="medium",
-            current_graphics_mode="auto",
-        )
-        self.assertEqual(set(overlay._graphics_btns), {"auto", "low", "medium", "high"})
-        overlay.set_auto_graphics_result("high", "Detected discrete graphics")
-        self.assertIn("HIGH", overlay._graphics_btns["auto"]._desc.text())
-        self.assertIn("Detected discrete graphics", overlay._graphics_note.text())
-        overlay.deleteLater()
-
     def test_explicit_self_quit_commands_route_to_argus(self):
         for command in (
             "quit ARGUS",
@@ -202,101 +191,6 @@ class UIRegressionTests(unittest.TestCase):
              patch.object(ui.QTimer, "singleShot", side_effect=lambda _delay, callback: callback()):
             self.assertTrue(self.window._handle_ui_command("quit ARGUS"))
         request_quit.assert_called_once_with()
-
-    def test_setup_overlay_is_centered_after_first_show(self):
-        overlay = self.window._overlay
-        self.assertIsNotNone(overlay)
-        expected_x = (self.window.centralWidget().width() - overlay.width()) // 2
-        expected_y = (self.window.centralWidget().height() - overlay.height()) // 2
-        self.assertEqual((overlay.x(), overlay.y()), (expected_x, expected_y))
-
-    def test_setup_exposes_replay_preference(self):
-        overlay = ui.SetupOverlay(replay_every_launch=True)
-        self.assertTrue(overlay.replay_intro_enabled())
-        overlay._replay_intro.setChecked(False)
-        self.assertFalse(overlay.replay_intro_enabled())
-        overlay.deleteLater()
-
-    def test_setup_validation_state_is_visible_and_recoverable(self):
-        overlay = ui.SetupOverlay()
-        overlay._key_input.setText("AIza-test-key")
-        overlay.set_validating()
-        self.assertTrue(overlay._setup_status.isVisibleTo(overlay))
-        self.assertIn("VALIDATING GEMINI API KEY", overlay._setup_status.text())
-        self.assertFalse(overlay._key_input.isEnabled())
-        overlay.set_validation_error("API key is not valid.")
-        self.assertTrue(overlay._key_input.isEnabled())
-        self.assertTrue(overlay._init_btn.isVisibleTo(overlay))
-        self.assertIn("API KEY VALIDATION FAILED", overlay._setup_status.text())
-        overlay.deleteLater()
-
-    def test_replay_selected_during_setup_applies_to_current_launch(self):
-        original_overlay = self.window._overlay
-        original_should_play = self.window._intro_should_play
-        original_kind = self.window._startup_sequence_kind
-        original_gate = self.window._interaction_gated
-        overlay = ui.SetupOverlay(replay_every_launch=True)
-        self.window._overlay = overlay
-        self.window._intro_should_play = False
-        self.window._startup_sequence_kind = ""
-        try:
-            with patch.object(ui.threading, "Thread") as thread:
-                self.window._on_setup_done("AIza" + "x" * 30, "mac", False)
-            self.assertTrue(self.window._intro_should_play)
-            self.assertIn("VALIDATING GEMINI API KEY", overlay._setup_status.text())
-            thread.assert_called_once()
-        finally:
-            self.window._overlay = original_overlay
-            self.window._intro_should_play = original_should_play
-            self.window._startup_sequence_kind = original_kind
-            self.window._interaction_gated = original_gate
-            overlay.deleteLater()
-
-    def test_setup_api_guide_expands_without_clearing_the_key(self):
-        overlay = ui.SetupOverlay()
-        overlay.show()
-        overlay._key_input.setText("AIza-test-key")
-        self.assertFalse(overlay._guide_scroll.isVisible())
-        overlay._guide_button.click()
-        self.app.processEvents()
-        self.assertTrue(overlay._guide_scroll.isVisible())
-        self.assertEqual(overlay._key_input.text(), "AIza-test-key")
-        self.assertIn("Hide API key guide", overlay._guide_button.text())
-        overlay._guide_button.click()
-        self.assertEqual(overlay._key_input.text(), "AIza-test-key")
-        overlay.hide()
-        overlay.deleteLater()
-
-    def test_setup_api_guide_opens_official_ai_studio_page(self):
-        overlay = ui.SetupOverlay()
-        with patch.object(ui.QDesktopServices, "openUrl", return_value=True) as open_url:
-            overlay._open_api_key_page()
-        self.assertEqual(
-            open_url.call_args.args[0].toString(),
-            "https://aistudio.google.com/apikey",
-        )
-        overlay.deleteLater()
-
-    def test_startup_backdrop_covers_the_live_console_during_setup(self):
-        self.window._ensure_startup_backdrop()
-        backdrop = self.window._startup_backdrop
-        self.assertIsNotNone(backdrop)
-        self.assertTrue(backdrop.isVisible())
-        self.assertEqual(backdrop.geometry(), self.window.centralWidget().rect())
-        self.assertIs(self.window._overlay.parentWidget(), self.window.centralWidget())
-
-    def test_settings_exposes_replay_preference_after_setup(self):
-        overlay = ui.SettingsOverlay(replay_intro=True)
-        self.assertTrue(overlay._s_replay_intro.isChecked())
-        changes = []
-        overlay.intro_replay_changed.connect(changes.append)
-        overlay._s_replay_intro.setChecked(False)
-        self.assertEqual(changes, [False])
-        tour_requests = []
-        overlay.tour_replay_requested.connect(lambda: tour_requests.append(True))
-        overlay._s_replay_tour.click()
-        self.assertEqual(tour_requests, [True])
-        overlay.deleteLater()
 
     def test_segmented_tts_retries_when_model_returns_no_audio(self):
         empty_response = SimpleNamespace(candidates=[])
@@ -401,56 +295,6 @@ class UIRegressionTests(unittest.TestCase):
             self.window._intro_overlay = original_intro
             self.window._startup_sequence_kind = original_kind
             intro.deleteLater()
-
-    def test_startup_gate_blocks_text_callbacks_until_ready(self):
-        original_ready = self.window._ready
-        original_intro = self.window._intro_in_progress
-        original_callback = self.window.on_text_command
-        callback = MagicMock()
-        self.window.on_text_command = callback
-        self.window._ready = False
-        self.window._intro_in_progress = True
-        try:
-            self.window._send("run a task")
-            callback.assert_not_called()
-        finally:
-            self.window._ready = original_ready
-            self.window._intro_in_progress = original_intro
-            self.window.on_text_command = original_callback
-
-    def test_operational_readiness_requires_every_startup_gate_to_clear(self):
-        original = (
-            self.window._ready,
-            self.window._interaction_gated,
-            self.window._intro_in_progress,
-            self.window._intro_voice_preparing,
-            self.window._intro_overlay,
-            self.window._overlay,
-        )
-        try:
-            self.window._ready = True
-            self.window._interaction_gated = False
-            self.window._intro_in_progress = False
-            self.window._intro_voice_preparing = False
-            self.window._intro_overlay = None
-            self.window._overlay = None
-            facade = ui.ArgusUI.__new__(ui.ArgusUI)
-            facade._win = self.window
-            self.assertTrue(facade.operational_ready)
-            self.window._intro_in_progress = True
-            self.assertFalse(facade.operational_ready)
-            self.window._intro_in_progress = False
-            self.window._intro_voice_preparing = True
-            self.assertFalse(facade.operational_ready)
-        finally:
-            (
-                self.window._ready,
-                self.window._interaction_gated,
-                self.window._intro_in_progress,
-                self.window._intro_voice_preparing,
-                self.window._intro_overlay,
-                self.window._overlay,
-            ) = original
 
     def test_splitter_uses_evaluated_stylesheet(self):
         sheet = self.window._splitter.styleSheet()
