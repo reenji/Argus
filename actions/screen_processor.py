@@ -16,7 +16,7 @@ from core.paths import get_data_dir
 from memory.config_manager import get_gemini_key
 
 import numpy as np
-import sounddevice as sd
+from core.lazy_sounddevice import sd
 
 def _get_voice_name() -> str:
     """Read voice name dynamically so it picks up runtime changes."""
