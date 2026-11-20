@@ -17,7 +17,7 @@
     "class-variance-authority": "latest",
     "clsx": "latest",
     "lucide-react": "latest",
-    "next": "16.4.3",
+    "next": "16.4.6",
     "react": "latest",
     "react-dom": "latest",
     "tailwind-merge": "latest"
