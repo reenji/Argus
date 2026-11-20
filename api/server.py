@@ -38,9 +38,11 @@ from .schemas import (
     ChatResponse,
     GeminiKeyRequest,
     LoginRequest,
+    ResendVerificationRequest,
     SessionView,
     UserCreate,
     UserView,
+    VerifyEmailRequest,
 )
 from .secret_service import (
     delete_user_secret,
@@ -48,7 +50,16 @@ from .secret_service import (
     has_user_secret,
     set_user_secret,
 )
-from .security import create_access_token, hash_password, verify_password, verify_unknown_account
+from . import mailer
+from .security import (
+    create_access_token,
+    create_email_verification_token,
+    email_verification_signature_ok,
+    hash_password,
+    read_email_verification_token,
+    verify_password,
+    verify_unknown_account,
+)
 from .websocket_client import WebSocketClient
 
 
@@ -283,16 +294,60 @@ async def signup(
 ) -> SessionView:
     await limiter.consume(_client_ip(request), "signup_ip", 10, 3600)
     await limiter.consume(payload.email.lower(), "signup", 5, 3600)
-    return await asyncio.to_thread(_create_account, db, payload)
+    if not mailer.verification_enabled():
+        return await asyncio.to_thread(_create_account, db, payload, True)
+    # Same answer whether or not the address already has an account, so signup
+    # cannot be used to find out who uses ARGUS.
+    user, created = await asyncio.to_thread(_create_unverified_account, db, payload)
+    if created:
+        await _send_verification(user)
+    else:
+        await mailer.send(
+            user.email,
+            "Your ARGUS account",
+            "Someone tried to create an ARGUS account with this email address, which already has one.\n"
+            f"If it was you, sign in at {settings.web_app_url}. Otherwise you can ignore this message.\n",
+        )
+    return JSONResponse({"status": "verification_sent"}, status_code=202)
 
 
-# scrypt costs ~25 ms of CPU and the ORM is synchronous; both run in worker
-# threads so one sign-in cannot stall every live session on the event loop.
-def _create_account(db: Session, payload: UserCreate) -> SessionView:
+async def _send_verification(user: User) -> None:
+    token = create_email_verification_token(user.id, user.email, settings.email_verification_hours)
+    await mailer.send(
+        user.email,
+        "Confirm your ARGUS email",
+        "Confirm this email address to finish creating your ARGUS account:\n"
+        f"{settings.web_app_url}/?verify={token}\n\n"
+        f"The link works for {settings.email_verification_hours} hours. If you did not sign up, ignore this message.\n",
+    )
+
+
+def _create_unverified_account(db: Session, payload: UserCreate) -> tuple[User, bool]:
     user = User(
         email=payload.email.lower().strip(),
         display_name=payload.display_name.strip(),
         password_hash=hash_password(payload.password),
+    )
+    db.add(user)
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        return db.scalar(select(User).where(User.email == payload.email.lower().strip())), False
+    db.refresh(user)
+    return user, True
+
+
+# scrypt costs ~25 ms of CPU and the ORM is synchronous; both run in worker
+# threads so one sign-in cannot stall every live session on the event loop.
+def _create_account(db: Session, payload: UserCreate, verified: bool = False) -> SessionView:
+    user = User(
+        email=payload.email.lower().strip(),
+        display_name=payload.display_name.strip(),
+        password_hash=hash_password(payload.password),
+        # Without verification the address is trusted as typed; turning
+        # verification on later must not lock these accounts out.
+        email_verified_at=datetime.now(timezone.utc) if verified else None,
     )
     db.add(user)
     try:
@@ -314,6 +369,9 @@ def _authenticate(db: Session, account: str, password: str) -> SessionView | Non
         return None
     if not verify_password(password, user.password_hash):
         return None
+    # Only someone who knows the password learns that the address is unconfirmed.
+    if mailer.verification_enabled() and user.email_verified_at is None:
+        raise api_error(403, "email_not_verified", "Confirm your email address first; check your inbox")
     return SessionView(
         access_token=create_access_token(user.id, user.session_version),
         user=_user_view(user, db),
@@ -345,6 +403,57 @@ async def login(
         await limiter.record(account, "login_failures", LOGIN_FAILURE_WINDOW)
         raise api_error(401, "invalid_credentials", "Email or password is incorrect")
     return session
+
+
+def _verify_email(db: Session, token: str) -> SessionView | None:
+    parsed = read_email_verification_token(token)
+    if parsed is None:
+        return None
+    user_id, expires = parsed
+    if expires < int(datetime.now(timezone.utc).timestamp()):
+        return None
+    user = db.get(User, user_id)
+    if user is None or not email_verification_signature_ok(token, user.id, user.email, expires):
+        return None
+    if user.email_verified_at is None:
+        user.email_verified_at = datetime.now(timezone.utc)
+        db.commit()
+        db.refresh(user)
+    return SessionView(
+        access_token=create_access_token(user.id, user.session_version),
+        user=_user_view(user, db),
+    )
+
+
+@app.post("/auth/verify", response_model=SessionView)
+async def verify_email(
+    payload: VerifyEmailRequest,
+    request: Request,
+    db: Session = Depends(get_db),
+) -> SessionView:
+    await limiter.consume(_client_ip(request), "verify_ip", 30, 3600)
+    session = await asyncio.to_thread(_verify_email, db, payload.token)
+    if session is None:
+        raise api_error(400, "invalid_verification", "This confirmation link is invalid or has expired")
+    return session
+
+
+@app.post("/auth/verify/resend", status_code=202)
+async def resend_verification(
+    payload: ResendVerificationRequest,
+    request: Request,
+    db: Session = Depends(get_db),
+) -> dict[str, str]:
+    await limiter.consume(_client_ip(request), "resend_ip", 10, 3600)
+    await limiter.consume(payload.email.lower(), "resend", 3, 3600)
+    if mailer.verification_enabled():
+        user = await asyncio.to_thread(
+            lambda: db.scalar(select(User).where(User.email == payload.email.lower().strip()))
+        )
+        if user is not None and user.email_verified_at is None:
+            await _send_verification(user)
+    # The same answer for unknown, verified and unverified addresses.
+    return {"status": "verification_sent"}
 
 
 @app.get("/auth/me", response_model=UserView)

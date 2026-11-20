@@ -1,23 +1,50 @@
 "use client";
 
-import { FormEvent, useState } from "react";
+import { FormEvent, useEffect, useState } from "react";
 import { ArrowRight, ShieldCheck } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { api, type Session } from "@/lib/api";
+import { api, ApiError, type Session } from "@/lib/api";
 
 export function AuthScreen({ onSession }: { onSession: (session: Session) => void }) {
   const [mode, setMode] = useState<"login" | "signup">("login");
   const [pending, setPending] = useState(false);
   const [error, setError] = useState("");
+  // Set after signup or an unconfirmed sign-in: the address waiting for its link.
+  const [pendingEmail, setPendingEmail] = useState("");
+  const [notice, setNotice] = useState("");
+
+  // The emailed link opens the app with ?verify=<token>; confirm it and sign in.
+  useEffect(() => {
+    const url = new URL(window.location.href);
+    const token = url.searchParams.get("verify");
+    if (!token) return;
+    url.searchParams.delete("verify");
+    window.history.replaceState(null, "", url.pathname + url.search + url.hash);
+    api<Session>("/auth/verify", { method: "POST", body: JSON.stringify({ token }) })
+      .then(onSession)
+      .catch((reason) => setError(reason instanceof Error ? reason.message : "This confirmation link is invalid or has expired"));
+  }, [onSession]);
+
+  async function resend() {
+    setNotice("");
+    try {
+      await api("/auth/verify/resend", { method: "POST", body: JSON.stringify({ email: pendingEmail }) });
+      setNotice(`If ${pendingEmail} is waiting for confirmation, a new link is on its way.`);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Could not send a new link");
+    }
+  }
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     setPending(true);
     setError("");
+    setNotice("");
     const data = new FormData(event.currentTarget);
+    const email = String(data.get("email") || "");
     try {
-      const session = await api<Session>(`/auth/${mode}`, {
+      const result = await api<Session | { status: string }>(`/auth/${mode}`, {
         method: "POST",
         body: JSON.stringify({
           email: data.get("email"),
@@ -25,8 +52,12 @@ export function AuthScreen({ onSession }: { onSession: (session: Session) => voi
           ...(mode === "signup" ? { display_name: data.get("display_name") } : {}),
         }),
       });
-      onSession(session);
+      if ("access_token" in result) return onSession(result);
+      // With email verification on, signup answers the same for every address.
+      setPendingEmail(email);
+      setNotice(`Check ${email} for a link to confirm your account.`);
     } catch (reason) {
+      if (reason instanceof ApiError && reason.code === "email_not_verified") setPendingEmail(email);
       setError(reason instanceof Error ? reason.message : "Authentication failed");
     } finally {
       setPending(false);
@@ -62,6 +93,10 @@ export function AuthScreen({ onSession }: { onSession: (session: Session) => voi
           <label>Email<Input name="email" type="email" autoComplete="email" required placeholder="operator@example.com" /></label>
           <label>Password<Input name="password" type="password" minLength={mode === "signup" ? 10 : undefined} maxLength={200} autoComplete={mode === "login" ? "current-password" : "new-password"} required placeholder={mode === "signup" ? "At least 10 characters" : "Your password"} /></label>
           {error && <p className="form-error" role="alert">{error}</p>}
+          {notice && <p className="form-notice" role="status">{notice}</p>}
+          {pendingEmail && (
+            <button type="button" className="text-link" onClick={resend}>Send a new confirmation link</button>
+          )}
           <Button type="submit" disabled={pending} className="w-full">
             {pending ? "Authorizing" : mode === "login" ? "Enter ARGUS" : "Create secure account"}
             {!pending && <ArrowRight size={16} />}
