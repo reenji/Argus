@@ -76,6 +76,8 @@ a { color: inherit; }
 .text-button { border: 0; background: transparent; color: var(--secondary-ink); font-size: .8rem; }
 .text-button:hover { color: var(--ink); }
 .form-error, .console-error { margin: 0; color: var(--danger); font-size: .78rem; line-height: 1.45; }
+.form-notice { margin: 0; color: var(--ink); font-size: .78rem; line-height: 1.45; }
+.text-link { justify-self: start; padding: 0; border: 0; background: none; color: inherit; font-size: .78rem; text-decoration: underline; cursor: pointer; }
 
 .entry-shell { min-height: 100vh; display: grid; grid-template-columns: minmax(0, 1.2fr) minmax(22rem, .8fr); }
 .entry-identity { position: relative; display: flex; min-height: 100vh; flex-direction: column; justify-content: center; overflow: hidden; padding: clamp(2rem, 7vw, 8rem); border-right: 1px solid var(--line); }
