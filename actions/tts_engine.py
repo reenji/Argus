@@ -7,7 +7,7 @@ import threading
 from typing import Callable
 
 import numpy as np
-import sounddevice as sd
+from core.lazy_sounddevice import sd
 
 RECEIVE_SAMPLE_RATE = 24000
 
