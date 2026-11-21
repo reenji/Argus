@@ -24,6 +24,8 @@ serviços e volumes desse projeto ao terminar. A regra registrada pelo coletor
 define saturação como o primeiro estágio com p95 acima de 1.000 ms ou mais de
 1% de erros. Isso é um limiar operacional do script, não uma meta de produto.
 
+A rodada mais recente, feita no GitHub Actions em 2026-10-20, está em [ci-2026-10-20.md](ci-2026-10-20.md).
+
 ## Medição local executada
 
 Em 2026-10-02, Linux CachyOS x86_64, kernel 7.2.7-1-cachyos, Python 3.14.7,
