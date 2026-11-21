@@ -20,6 +20,8 @@ guiados e pedem Enter antes da amostragem; use um terminal interativo. Adicione
 cenários. Sem essa opção, a chave é removida do ambiente, o chaveiro é
 desativado para o processo de medição e os dados usam um diretório temporário.
 
+A rodada mais recente, feita no GitHub Actions em 2026-10-20, está em [ci-2026-10-20.md](ci-2026-10-20.md).
+
 ## Execução registrada
 
 - Versão: 0.1.0; coletada às 23:41:24 UTC em 2026-10-02, Linux CachyOS x86_64,
