@@ -251,6 +251,69 @@ class HostedApiTests(unittest.TestCase):
         self.assertTrue(detail.get("message"), response.text)
         return detail["code"]
 
+    def _verification_signup(self, email):
+        return self.client.post("/auth/signup", headers=_from(_random_address()), json={
+            "email": email, "password": "correct-horse-battery-staple", "display_name": "Vera",
+        })
+
+    @staticmethod
+    def _link_token(message):
+        body = message.get_content()
+        return body.split("?verify=", 1)[1].split()[0]
+
+    def test_email_verification_hides_existing_accounts_and_gates_sign_in(self):
+        import api.mailer
+
+        api.mailer.outbox.clear()
+        email = f"vera-{uuid.uuid4().hex}@example.com"
+        with patch.object(api.mailer, "verification_enabled", return_value=True):
+            fresh = self._verification_signup(email)
+            existing = self._verification_signup(self.email)
+            self.assertEqual((fresh.status_code, fresh.json()), (202, {"status": "verification_sent"}))
+            self.assertEqual((existing.status_code, existing.json()), (202, {"status": "verification_sent"}),
+                             "an existing address gets the same answer")
+            sent = {message["To"]: message for message in api.mailer.outbox}
+            self.assertIn("?verify=", sent[email].get_content())
+            self.assertNotIn("?verify=", sent[self.email].get_content(), "the owner only gets a notice")
+
+            login = {"email": email, "password": "correct-horse-battery-staple"}
+            blocked = self.client.post("/auth/login", headers=_from(_random_address()), json=login)
+            self.assertEqual((blocked.status_code, blocked.json()["detail"]["code"]), (403, "email_not_verified"))
+
+            verified = self.client.post("/auth/verify", headers=_from(_random_address()),
+                                        json={"token": self._link_token(sent[email])})
+            self.assertEqual(verified.status_code, 200, verified.text)
+            self.assertEqual(verified.json()["user"]["email"], email)
+            self.assertEqual(
+                self.client.post("/auth/login", headers=_from(_random_address()), json=login).status_code, 200)
+            # Accounts made before verification was on still sign in.
+            self.assertEqual(self._login_from(_random_address(), "correct-horse-battery-staple").status_code, 200)
+        with SessionLocal.begin() as db:
+            db.execute(delete(User).where(User.email == email))
+
+    def test_bad_verification_links_and_resend_reveal_nothing(self):
+        import api.mailer
+
+        api.mailer.outbox.clear()
+        email = f"rui-{uuid.uuid4().hex}@example.com"
+        with patch.object(api.mailer, "verification_enabled", return_value=True):
+            self._verification_signup(email)
+            token = self._link_token(api.mailer.outbox[-1])
+            for bad in (token[:-2] + "xx", "not.a.token-at-all", token.replace(".", "x", 1)):
+                response = self.client.post("/auth/verify", headers=_from(_random_address()), json={"token": bad})
+                self.assertEqual(response.status_code, 400, bad)
+                self.assertEqual(response.json()["detail"]["code"], "invalid_verification")
+
+            api.mailer.outbox.clear()
+            for address in (email, f"nobody-{uuid.uuid4().hex}@example.com", self.email):
+                response = self.client.post("/auth/verify/resend", headers=_from(_random_address()),
+                                            json={"email": address})
+                self.assertEqual((response.status_code, response.json()), (202, {"status": "verification_sent"}))
+            self.assertEqual([message["To"] for message in api.mailer.outbox], [email],
+                             "only the unverified account gets a new link")
+        with SessionLocal.begin() as db:
+            db.execute(delete(User).where(User.email == email))
+
     def test_every_api_error_has_a_code_and_message(self):
         signup = {"email": self.email, "password": "correct-horse-battery-staple", "display_name": "Dup"}
         self.assertEqual(self._error_code(

@@ -97,3 +97,30 @@ def decode_access_token(token: str) -> dict:
         return payload
     except (ValueError, TypeError, json.JSONDecodeError) as exc:
         raise ValueError("Invalid or expired session") from exc
+
+
+def _verification_signature(user_id: str, email: str, expires: int) -> str:
+    message = f"verify-email:{user_id}:{email}:{expires}".encode("utf-8")
+    return _b64(hmac.new(settings.jwt_secret.encode("utf-8"), message, hashlib.sha256).digest())
+
+
+def create_email_verification_token(user_id: str, email: str, hours: int) -> str:
+    """A signed link token; changing the account's email invalidates it."""
+    expires = int((datetime.now(timezone.utc) + timedelta(hours=hours)).timestamp())
+    payload = _b64(json.dumps({"sub": user_id, "exp": expires}, separators=(",", ":")).encode("utf-8"))
+    return f"{payload}.{_verification_signature(user_id, email, expires)}"
+
+
+def read_email_verification_token(token: str) -> tuple[str, int] | None:
+    """Returns (user_id, expires) when the token is well formed; the signature is checked against the account."""
+    try:
+        payload, _signature = token.split(".", 1)
+        claims = json.loads(_unb64(payload))
+        return str(claims["sub"]), int(claims["exp"])
+    except (ValueError, KeyError, TypeError):
+        return None
+
+
+def email_verification_signature_ok(token: str, user_id: str, email: str, expires: int) -> bool:
+    signature = token.split(".", 1)[1] if "." in token else ""
+    return hmac.compare_digest(signature, _verification_signature(user_id, email, expires))

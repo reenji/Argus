@@ -44,6 +44,16 @@ class Settings:
     }
     # Without Redis each process keeps its own counters, which multiplies
     # every limit by the number of workers, so production refuses to start.
+    # Outgoing mail (for example Brevo: smtp-relay.brevo.com:587 with the SMTP key).
+    # Setting SMTP_HOST turns on email verification for new accounts.
+    smtp_host: str = os.environ.get("SMTP_HOST", "").strip()
+    smtp_port: int = int(os.environ.get("SMTP_PORT", "587"))
+    smtp_user: str = os.environ.get("SMTP_USER", "").strip()
+    smtp_password: str = os.environ.get("SMTP_PASSWORD", "")
+    mail_from: str = os.environ.get("MAIL_FROM", "").strip()
+    # Where the verification link points: the web app's origin.
+    web_app_url: str = os.environ.get("WEB_APP_URL", "http://localhost:3000").strip().rstrip("/")
+    email_verification_hours: int = int(os.environ.get("EMAIL_VERIFICATION_HOURS", "24"))
     redis_required: bool = field(default_factory=lambda: os.environ.get(
         "REDIS_REQUIRED",
         "1" if os.environ.get("ARGUS_ENV", "development").lower() == "production" else "0",
@@ -68,6 +78,8 @@ class Settings:
             raise RuntimeError("Production DATABASE_URL must point to Postgres")
         # The default only allows local dev servers; a deploy that forgot
         # CORS_ORIGINS would start healthy while every browser call fails.
+        if self.smtp_host and not (self.mail_from and self.web_app_url.startswith("https://")):
+            raise RuntimeError("With SMTP_HOST set, production needs MAIL_FROM and an https WEB_APP_URL")
         if not self.cors_origins or any(
             not origin.startswith("https://") for origin in self.cors_origins
         ):

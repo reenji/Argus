@@ -15,6 +15,14 @@ class LoginRequest(BaseModel):
     password: str = Field(min_length=1, max_length=200)
 
 
+class VerifyEmailRequest(BaseModel):
+    token: str = Field(min_length=10, max_length=512)
+
+
+class ResendVerificationRequest(BaseModel):
+    email: EmailStr
+
+
 class UserView(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 

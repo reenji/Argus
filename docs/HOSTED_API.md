@@ -3,7 +3,8 @@
 How the FastAPI service (`api/server.py`) authenticates clients, reports
 failures and runs in production.
 
-Endpoints: `POST /auth/signup`, `POST /auth/login`, `GET /auth/me`,
+Endpoints: `POST /auth/signup`, `POST /auth/login`, `POST /auth/verify`,
+`POST /auth/verify/resend`, `GET /auth/me`,
 `POST /auth/logout`, `POST|DELETE /me/gemini-key`, `GET /status`, `GET /actions`,
 `POST /chat`, `GET /health` and the live WebSocket `/ws`. Authenticated routes
 take `Authorization: Bearer <token>`.
@@ -22,7 +23,9 @@ Validation errors also list the offending body fields in `detail.fields`.
 |---|---|---|
 | 401 | `unauthorized` | Missing, invalid, expired or revoked (after logout) token. |
 | 401 | `invalid_credentials` | Wrong email or password. |
-| 409 | `account_exists` | Signup with an email that already has an account. |
+| 400 | `invalid_verification` | The email confirmation link is invalid, expired or for a changed address. |
+| 403 | `email_not_verified` | Right password, but the account's email is not confirmed yet. |
+| 409 | `account_exists` | Signup with an email that already has an account (only while email verification is off). |
 | 409 | `gemini_key_required` | `/chat` without a saved Gemini key. |
 | 409 | `gemini_key_rejected` | Gemini rejected the saved API key. |
 | 422 | `invalid_request` | The body failed validation; see `fields`. |
@@ -34,6 +37,17 @@ Validation errors also list the offending body fields in `detail.fields`.
 | 503 | `gemini_unavailable` | Gemini returned a server error or could not be reached. |
 | 504 | `gemini_timeout` | Gemini did not answer within `ARGUS_CHAT_TIMEOUT_SECONDS`. |
 | 500 | `internal_error` | Unexpected server error; the stack trace is only in the server log. |
+
+## Email verification
+
+Setting `SMTP_HOST` turns it on. For Brevo: `SMTP_HOST=smtp-relay.brevo.com`, `SMTP_PORT=587`, `SMTP_USER` (the Brevo login) and `SMTP_PASSWORD` (an SMTP key), plus `MAIL_FROM` (a sender verified in Brevo) and `WEB_APP_URL` (the web app's https origin; the link is `WEB_APP_URL/?verify=<token>`). Production refuses to start with `SMTP_HOST` but no `MAIL_FROM` or an http `WEB_APP_URL`.
+
+- `POST /auth/signup` answers `202 {"status": "verification_sent"}` for every address. A new account gets a confirmation link valid for `EMAIL_VERIFICATION_HOURS` (24); an address that already has an account gets a notice instead, so signup does not reveal who uses ARGUS.
+- `POST /auth/login` with the right password but an unconfirmed address answers `403 email_not_verified`.
+- `POST /auth/verify {"token"}` confirms the address and returns a session. The token is signed with `JWT_SECRET` and tied to the account's current email.
+- `POST /auth/verify/resend {"email"}` answers `202` for any address and only mails accounts still waiting.
+- Accounts that existed before verification, or were created while it was off, count as verified.
+- Without `SMTP_HOST` signup keeps returning a session (`201`) and duplicates still get `409 account_exists`.
 
 ## Live WebSocket (`/ws`)
 
